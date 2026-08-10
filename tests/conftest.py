@@ -1,6 +1,24 @@
 import pytest
 
-from ytmatrix import youtube
+from ytmatrix import motion, server, youtube
+
+
+@pytest.fixture(autouse=True)
+def no_thumbnail_fetches(request, monkeypatch):
+    """Keep storyboard/motion scoring off the network in the default suite.
+
+    Motion scoring fetches three images per video from i.ytimg.com. That costs
+    no quota, but it is still the network: it makes the suite slow, flaky, and
+    dependent on ids that only exist in a fixture. Default to "moving" -- the
+    same thing an unmeasurable video gets -- and let tests that care stub it.
+    """
+    if request.node.get_closest_marker("browser") or request.node.get_closest_marker("live"):
+        return
+
+    async def unmeasured(video_id, cache_dir, client):
+        return motion.UNKNOWN_SCORE
+
+    monkeypatch.setattr(server, "motion_score", unmeasured)
 
 
 @pytest.fixture(autouse=True)

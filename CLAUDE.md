@@ -33,6 +33,7 @@ directory as a module on Node 23 and fails.
 | `ytmatrix/budget.py` | Daily quota ledger in `cache/_budget.json`; resets on Pacific date change. Local estimate, not a real reading. |
 | `ytmatrix/wallstate.py` | Persists the current query + history so reloads and restarts cost nothing. |
 | `ytmatrix/letterbox.py` | Finds the picture inside a boxed 16:9 frame, from the video's thumbnail. |
+| `ytmatrix/motion.py` | Scores real video vs. still-image-with-audio from storyboard frames; ranks the wall. |
 | `ytmatrix/server.py` | FastAPI routes, WS fan-out, and the cache-first `resolve_videos` that wires the three above. |
 | `ytmatrix/settings.py` | Env/secrets. `YOUTUBE_API_KEY` lives here, never in `config.yaml`. |
 | `ytmatrix/certs.py` | Self-signed cert generation (copied from layout-driver). |
@@ -153,6 +154,27 @@ directory as a module on Node 23 and fails.
     in JS yields `undefined`, `splitSlots` builds zero slots, and the wall goes
     blank — again with no error. JS derives the count via `cellCount(grid)` in
     `grid-logic.js`. Same class of bug as #12 and it hid behind it.
+
+16. **The Data API has no "is it actually moving" filter, and never will.**
+    Do not go looking for one — `videoDefinition`, `videoDuration`,
+    `videoDimension`, `videoType`, `videoCaption` and `videoCategoryId` are the
+    whole menu. Still-image-with-audio uploads are detected instead, by
+    comparing the three storyboard frames YouTube samples at `/1.jpg`,
+    `/2.jpg`, `/3.jpg`. Stills score under ~2.5, real footage 25+.
+
+    Two deliberate choices in `motion.py`: an unmeasurable video (thumbnail
+    404s) counts as **moving**, because dropping a legitimate result is worse
+    than showing one still; and when a query returns mostly stills the wall
+    **relaxes and uses them** rather than leaving cells empty, reporting the
+    count as `static_relaxed`. Do not "tighten" either into a hard reject.
+
+    `select_videos` measures only `grid + scan_depth` videos, not all 50 —
+    scoring everything would be 150 image fetches to fill eight cells.
+
+17. **Tests must not touch i.ytimg.com either.** It costs no quota, but it is
+    still the network: `conftest.py` stubs `server.motion_score` for every
+    non-browser test. Without it the suite went from 0.8s to 9.4s and started
+    depending on ids that only exist in a fixture.
 
 15. **Thumbnail choice decides whether letterbox detection works at all.**
     `mqdefault.jpg` (320×180) and `maxresdefault.jpg` (1280×720) are true 16:9

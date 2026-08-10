@@ -7,7 +7,7 @@ import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, letterbox, youtube
+from ytmatrix import budget, cache, gemini, letterbox, motion, server, youtube
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
 
@@ -617,6 +617,97 @@ def test_a_thumbnail_fetch_failure_does_not_break_the_cell(app_env, monkeypatch)
         response = client.get("/api/content-box/abc123")
     assert response.status_code == 200
     assert response.json() == letterbox.FULL_FRAME
+
+
+def stub_motion(monkeypatch, scores: dict, default=motion.UNKNOWN_SCORE):
+    async def fake_score(video_id, cache_dir, client):
+        return scores.get(video_id, default)
+
+    monkeypatch.setattr(server, "motion_score", fake_score)
+
+
+def test_still_image_videos_are_kept_off_the_wall(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(yaml.safe_dump({**VALID, "filtering": {"skip_static": True}}))
+    # The first four results are static album art.
+    stub_motion(monkeypatch, {ids[i]: 0.5 for i in range(4)}, default=30.0)
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert not set(body["video_ids"]) & set(ids[:4]), "a still made it onto the wall"
+    assert len(body["video_ids"]) == 8
+    assert body["static_relaxed"] == 0
+
+
+def test_filtering_preserves_relevance_order_among_the_survivors(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(yaml.safe_dump({**VALID, "filtering": {"skip_static": True}}))
+    stub_motion(monkeypatch, {ids[0]: 0.5}, default=30.0)
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert body["video_ids"] == ids[1:9], "search order should survive the filter"
+
+
+def test_it_relaxes_rather_than_leaving_cells_empty(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(yaml.safe_dump({**VALID, "filtering": {"skip_static": True}}))
+    # Almost everything is a still: the wall must still fill.
+    stub_motion(monkeypatch, {v: 0.5 for v in ids[:40]}, default=30.0)
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert len(body["video_ids"]) == 8, "cells were left empty instead of relaxing"
+
+
+def test_relaxing_is_reported_so_it_is_not_silent(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(yaml.safe_dump({**VALID, "filtering": {"skip_static": True}}))
+    stub_motion(monkeypatch, {v: 0.5 for v in ids}, default=0.5)
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert body["static_relaxed"] == 8
+
+
+def test_filtering_can_be_turned_off(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(yaml.safe_dump({**VALID, "filtering": {"skip_static": False}}))
+    stub_motion(monkeypatch, {v: 0.0 for v in ids})
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert body["video_ids"] == ids[:8], "filtering was applied despite being disabled"
+
+
+def test_scoring_stays_shallow_rather_than_measuring_all_fifty(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    seed_cache(cache_dir)
+    config_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"skip_static": True, "scan_depth": 4}})
+    )
+    measured = []
+
+    async def counting_score(video_id, cache_dir, client):
+        measured.append(video_id)
+        return 30.0
+
+    monkeypatch.setattr(server, "motion_score", counting_score)
+    with TestClient(app) as client:
+        client.get("/api/videos")
+
+    # grid (8) + scan_depth (4). Measuring all 50 would be 150 image fetches.
+    assert len(measured) == 12
 
 
 def test_settings_require_an_api_key(monkeypatch):

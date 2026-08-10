@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -9,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, letterbox, wallstate, youtube
+from ytmatrix import budget, cache, gemini, letterbox, motion, wallstate, youtube
 from ytmatrix.config import Config, load_config, save_config
 from ytmatrix.settings import Settings
 from ytmatrix.ws import ConnectionManager
@@ -65,19 +66,76 @@ async def resolve_videos(
     return {"items": items, "from_cache": False, "note": None}
 
 
-def videos_message(config: Config, resolved: dict, query: str, cache_dir: Path) -> dict:
+async def motion_score(video_id: str, cache_dir: Path, client: httpx.AsyncClient) -> float:
+    """Storyboard-frame motion score for one video, cached forever on disk.
+
+    A video's shape never changes, and these thumbnails are not the Data API,
+    so this costs no quota -- only three small image fetches, once per video.
+    """
+    store = cache_dir / "motion"
+    entry = store / f"{video_id}.json"
+    if entry.exists():
+        try:
+            return float(json.loads(entry.read_text())["score"])
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            pass  # Re-measure rather than fail.
+
+    async def frame(index: int) -> bytes | None:
+        try:
+            response = await client.get(
+                motion.STORYBOARD_URL.format(video_id=video_id, index=index)
+            )
+        except httpx.HTTPError:
+            return None
+        return response.content if response.status_code == 200 else None
+
+    fetched = await asyncio.gather(*(frame(i) for i in motion.STORYBOARD_INDICES))
+    score = motion.score_frames([f for f in fetched if f])
+
+    store.mkdir(parents=True, exist_ok=True)
+    tmp = entry.with_name(entry.name + ".tmp")
+    tmp.write_text(json.dumps({"score": score if score != motion.UNKNOWN_SCORE else None}))
+    tmp.replace(entry)
+    return score
+
+
+async def select_videos(config: Config, video_ids: list[str], cache_dir: Path) -> dict:
+    """Order the results so the wall shows things that actually move."""
+    if not config.filtering.skip_static or not video_ids:
+        cells = config.grid.cells
+        return {"slots": video_ids[:cells], "reserves": video_ids[cells:], "relaxed": 0}
+
+    # Measure only as deep as needed: the grid plus enough spares to substitute
+    # from. Scoring all 50 would mean 150 fetches for a wall of eight.
+    depth = min(len(video_ids), config.grid.cells + config.filtering.scan_depth)
+    head, tail = video_ids[:depth], video_ids[depth:]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        scores = await asyncio.gather(*(motion_score(v, cache_dir, client) for v in head))
+
+    result = motion.rank(
+        list(zip(head, scores, strict=True)),
+        needed=config.grid.cells,
+        threshold=config.filtering.static_threshold,
+    )
+    result["reserves"] = result["reserves"] + tail
+    return result
+
+
+def videos_message(
+    config: Config, resolved: dict, query: str, cache_dir: Path, selection: dict
+) -> dict:
     items = resolved["items"]
-    cells = config.grid.cells
-    video_ids = [item["video_id"] for item in items]
-    note = resolved["note"] or ("no_results" if not video_ids else None)
+    note = resolved["note"] or ("no_results" if not items else None)
     return {
         "type": "videos",
         "query": query,
-        "video_ids": video_ids[:cells],
-        "reserves": video_ids[cells:],
+        "video_ids": selection["slots"],
+        "reserves": selection["reserves"],
         "titles": {item["video_id"]: item["title"] for item in items},
         "from_cache": resolved["from_cache"],
         "note": note,
+        "static_relaxed": selection["relaxed"],
         "units_spent_today": budget.spent(cache_dir),
         "daily_limit_units": config.quota.daily_limit_units,
     }
@@ -111,7 +169,9 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
             ) from exc
         except youtube.SearchError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return videos_message(config, resolved, query, cache_dir)
+        video_ids = [item["video_id"] for item in resolved["items"]]
+        selection = await select_videos(config, video_ids, cache_dir)
+        return videos_message(config, resolved, query, cache_dir, selection)
 
     @app.get("/healthz")
     async def healthz() -> dict:

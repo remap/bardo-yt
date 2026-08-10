@@ -21,3 +21,7 @@ query_generation:
   avoid_repeats: 20
 quota:
   daily_limit_units: 5000
+filtering:
+  skip_static: true
+  static_threshold: 3.5
+  scan_depth: 24

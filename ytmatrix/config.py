@@ -83,6 +83,23 @@ class QueryGenerationConfig(Strict):
     avoid_repeats: int = Field(default=20, ge=0)
 
 
+class FilteringConfig(Strict):
+    """Keep still-image uploads off the wall.
+
+    A four-minute static album cover with a soundtrack is a legitimate search
+    result and useless on a video wall. The Data API cannot filter for motion,
+    so this is measured from the video's own storyboard frames instead.
+    """
+
+    skip_static: bool = True
+    # Mean frame-to-frame luma difference below which a video counts as a still.
+    # Measured stills cluster under 2.5; real footage starts around 5.
+    static_threshold: float = Field(default=3.5, ge=0)
+    # How many extra candidates to measure beyond the grid size, so there is
+    # something to substitute in when the top results turn out to be stills.
+    scan_depth: int = Field(default=24, ge=0)
+
+
 class QuotaConfig(Strict):
     """A self-imposed ceiling below the real 10,000-unit daily allowance.
 
@@ -100,6 +117,7 @@ class Config(Strict):
     playback: PlaybackConfig = PlaybackConfig()
     cache: CacheConfig = CacheConfig()
     query_generation: QueryGenerationConfig = QueryGenerationConfig()
+    filtering: FilteringConfig = FilteringConfig()
     quota: QuotaConfig = QuotaConfig()
 
     @field_validator("query")

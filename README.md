@@ -92,6 +92,37 @@ separately and independently of this counter. For an authoritative number, read
 the Cloud console (**APIs & Services → Quotas**), or wire up the Service Usage
 API — that one *does* accept a service account, unlike the YouTube Data API.
 
+## Keeping still images off the wall
+
+A large share of music results on YouTube are one static album cover with
+audio over it — legitimate results, useless on a video wall. **The Data API
+cannot filter for this**: `search.list` offers `videoDefinition`,
+`videoDuration`, `videoDimension`, `videoType`, `videoCaption` and friends,
+and none of them say whether the picture moves.
+
+So it's measured instead. YouTube samples three frames across every video at
+`/1.jpg`, `/2.jpg`, `/3.jpg`; if they're near-identical, nothing is happening.
+Against a real result set the separation is wide:
+
+| score | what it is |
+|---|---|
+| under 2.5 | still image with a soundtrack |
+| 5–15 | slow or locked-off footage |
+| 25–41 | genuinely edited video |
+
+`filtering.static_threshold` (default 3.5) is the cutoff. Stills are held back
+in the reserve pool rather than shown, exactly like a failed embed — but if a
+query returns *mostly* stills, the wall relaxes and uses the liveliest of them
+rather than leaving cells empty. A still beats a black hole. The count of
+relaxed cells is reported as `static_relaxed`, so it is never silent.
+
+This costs no quota and only measures as deep as it needs to
+(`grid + scan_depth` videos, not all 50). Scores are cached per video forever.
+
+The other half is the query itself: Gemini is told to favour words implying a
+filmed event (live, session, busking, rehearsal, street) and to avoid the ones
+that attract static uploads (album, playlist, lyrics, audio, mix, 1 hour).
+
 ## Letterbox detection
 
 YouTube renders every video into a 16:9 player, so vertically-shot and
