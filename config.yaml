@@ -1,0 +1,20 @@
+query: "golden cover"
+
+grid:
+  cols: 4
+  rows: 2
+
+search:
+  order: relevance
+  video_duration: any
+  safe_search: moderate
+  relevance_language: en
+
+playback:
+  muted: true
+  autoplay_on_change: true
+  start_offset: 0
+  loop: true
+
+cache:
+  ttl_hours: 24
