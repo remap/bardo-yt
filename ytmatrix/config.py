@@ -72,12 +72,40 @@ class CacheConfig(Strict):
     ttl_hours: float = Field(default=24.0, gt=0)
 
 
+class QueryGenerationConfig(Strict):
+    """Gemini invents a fresh query on each page load when enabled.
+
+    Every generated query is a cache miss by construction, so every reload
+    costs a 100-unit search. That is the point of the feature and also its
+    danger -- see QuotaConfig.
+    """
+
+    enabled: bool = False
+    theme: str = "cover songs and reinterpretations"
+    model: str = "gemini-3.6-flash"
+    # How many previously generated queries to show Gemini so it does not
+    # circle back to one already paid for.
+    avoid_repeats: int = Field(default=20, ge=0)
+
+
+class QuotaConfig(Strict):
+    """A self-imposed ceiling below the real 10,000-unit daily allowance.
+
+    Set to 0 to disable the guard entirely and spend freely up to whatever
+    Google cuts you off at.
+    """
+
+    daily_limit_units: int = Field(default=5000, ge=0)
+
+
 class Config(Strict):
     query: str
     grid: Grid
     search: SearchConfig = SearchConfig()
     playback: PlaybackConfig = PlaybackConfig()
     cache: CacheConfig = CacheConfig()
+    query_generation: QueryGenerationConfig = QueryGenerationConfig()
+    quota: QuotaConfig = QuotaConfig()
 
     @field_validator("query")
     @classmethod

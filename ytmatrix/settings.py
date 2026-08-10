@@ -23,5 +23,10 @@ class Settings(BaseSettings):
     # than YTMATRIX_YOUTUBE_API_KEY.
     youtube_api_key: str = Field(validation_alias="YOUTUBE_API_KEY")
 
+    # Optional: only needed when query_generation.enabled is true. Absent is a
+    # legitimate configuration, so this must not fail startup the way a missing
+    # YouTube key does.
+    gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
+
     host: str = "0.0.0.0"
     port: int = 8444

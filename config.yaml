@@ -14,3 +14,10 @@ playback:
   loop: true
 cache:
   ttl_hours: 24.0
+query_generation:
+  enabled: true
+  theme: cover songs and reinterpretations
+  model: gemini-3.6-flash
+  avoid_repeats: 20
+quota:
+  daily_limit_units: 5000

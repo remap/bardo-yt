@@ -29,6 +29,8 @@ directory as a module on Node 23 and fails.
 | `ytmatrix/config.py` | pydantic models for `config.yaml`; load/save/validate. Knows nothing about YouTube or the cache. |
 | `ytmatrix/youtube.py` | `build_params` + `search` against the REST API. Knows nothing about config files or disk. |
 | `ytmatrix/cache.py` | Content-addressed on-disk cache. Knows nothing about YouTube. |
+| `ytmatrix/gemini.py` | Invents a search query from a theme plus an avoid-list. Knows nothing but Gemini. |
+| `ytmatrix/budget.py` | Daily quota ledger in `cache/_budget.json`; resets on date change. |
 | `ytmatrix/server.py` | FastAPI routes, WS fan-out, and the cache-first `resolve_videos` that wires the three above. |
 | `ytmatrix/settings.py` | Env/secrets. `YOUTUBE_API_KEY` lives here, never in `config.yaml`. |
 | `ytmatrix/certs.py` | Self-signed cert generation (copied from layout-driver). |
@@ -48,9 +50,18 @@ directory as a module on Node 23 and fails.
    fail at runtime with an unhelpful error.
 
 2. **`search.list` costs 100 quota units per call, out of 10,000/day.** That
-   is 100 searches. Never add a code path that searches on a timer, on page
-   load, or per cell. Resolution is cache-first and the cache key deliberately
+   is 100 searches. Resolution is cache-first and the cache key deliberately
    excludes the API key.
+
+   `query_generation.enabled` deliberately breaks the cache: a Gemini-invented
+   query is a cache miss by construction, so **every page load costs 100
+   units**. That is the feature working as asked, and it is why
+   `ytmatrix/budget.py` and `quota.daily_limit_units` exist. Two rules follow:
+   the budget is checked *before* spending, and generation happens **once per
+   page load, not per WebSocket reconnect** — a reconnect is a network hiccup,
+   and regenerating on one would drain the day every time the wifi blinks.
+   `generatedThisPageLoad` in `player.js` is what enforces that; do not move
+   the generation call into `resync()` unconditionally.
 
 3. **Cost is per call, not per result** — so `maxResults` is always 50. Do not
    "optimize" it down to the grid size; that saves nothing and destroys the

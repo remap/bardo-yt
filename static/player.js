@@ -180,31 +180,50 @@ function applyVideos(message) {
   slotState = splitSlots(message.video_ids.concat(message.reserves), cellCount(config.grid));
   const notes = {
     quota_exceeded_stale: "quota spent — showing cached results",
+    budget_exceeded_stale: "daily budget spent — showing cached results",
     no_results: "no results for that query",
   };
+  const spent = message.units_spent_today ?? 0;
+  const limit = message.daily_limit_units ?? 0;
+  const budgetText = limit ? ` · ${spent}/${limit} units today` : ` · ${spent} units today`;
   setStatus(
     notes[message.note] ??
-      `${message.video_ids.filter(Boolean).length} playing · ${
+      `“${message.query}” — ${message.video_ids.filter(Boolean).length} playing · ${
         message.from_cache ? "cached" : "fresh search"
-      }`,
+      }${budgetText}`,
     message.note ? "error" : "",
   );
   rebuild();
 }
 
-async function resync() {
-  const [configResponse, videosResponse] = await Promise.all([
-    fetch("/api/config"),
-    fetch("/api/videos"),
-  ]);
-  config = await configResponse.json();
+// Generation happens once per page load. resync() also runs on every WebSocket
+// reconnect, and a reconnect is a network hiccup -- spending 100 units each
+// time the wifi blinks would drain the day's budget with nothing to show.
+let generatedThisPageLoad = false;
 
+async function resync() {
+  config = await (await fetch("/api/config")).json();
+
+  if (config.query_generation?.enabled && !generatedThisPageLoad) {
+    generatedThisPageLoad = true;
+    setStatus("inventing a query…");
+    const generated = await fetch("/api/new-query", { method: "POST" });
+    if (generated.ok) {
+      applyVideos(await generated.json());
+      return;
+    }
+    // Fall through to the existing query: a failed generation should leave the
+    // wall working, not blank.
+    const body = await generated.json().catch(() => ({}));
+    setStatus(`query generation failed: ${body.detail ?? generated.status}`, "error");
+  }
+
+  const videosResponse = await fetch("/api/videos");
   if (!videosResponse.ok) {
     const body = await videosResponse.json().catch(() => ({}));
     setStatus(body.detail ?? `error ${videosResponse.status}`, "error");
     return;
   }
-
   applyVideos(await videosResponse.json());
 }
 

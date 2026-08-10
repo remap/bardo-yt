@@ -6,7 +6,7 @@ import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from ytmatrix import cache, youtube
+from ytmatrix import budget, cache, gemini, youtube
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
 
@@ -247,6 +247,204 @@ def test_the_config_page_is_served(app_env):
     app, _, _ = app_env
     with TestClient(app) as client:
         assert client.get("/config").status_code == 200
+
+
+GENERATING = {
+    **VALID,
+    "query_generation": {
+        "enabled": True,
+        "theme": "cover songs",
+        "model": "gemini-3.6-flash",
+        "avoid_repeats": 20,
+    },
+}
+
+
+@pytest.fixture
+def generating_env(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(GENERATING))
+    cache_dir = tmp_path / "cache"
+    settings = Settings(youtube_api_key="TEST_KEY", gemini_api_key="GEMINI_KEY")
+    app = create_app(config_path=config_path, cache_dir=cache_dir, settings=settings)
+    return app, config_path, cache_dir
+
+
+def stub_search(monkeypatch, count=50, prefix="g"):
+    async def fake_search(params, api_key, *, client=None):
+        return [{"video_id": f"{prefix}{i}", "title": "T", "channel": "C"} for i in range(count)]
+
+    monkeypatch.setattr(youtube, "search", fake_search)
+
+
+def test_new_query_puts_the_generated_query_on_the_wall(generating_env, monkeypatch):
+    app, _, _ = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        return "shoegaze motown covers"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        body = client.post("/api/new-query").json()
+    assert body["query"] == "shoegaze motown covers"
+    assert len(body["video_ids"]) == 8
+
+
+def test_the_generated_query_persists_for_later_requests(generating_env, monkeypatch):
+    app, _, _ = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        return "bossa nova covers"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+        assert client.get("/api/videos").json()["query"] == "bossa nova covers"
+
+
+def test_each_generation_is_told_what_was_already_used(generating_env, monkeypatch):
+    app, _, _ = generating_env
+    stub_search(monkeypatch)
+    seen = []
+    counter = iter(range(100))
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        seen.append(list(avoid))
+        return f"query {next(counter)}"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+        client.post("/api/new-query")
+        client.post("/api/new-query")
+
+    assert seen[0] == []
+    assert seen[1] == ["query 0"]
+    assert seen[2] == ["query 0", "query 1"]
+
+
+def test_new_query_broadcasts_to_the_wall(generating_env, monkeypatch):
+    app, _, _ = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        return "sea shanty covers"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        client.post("/api/new-query")
+        message = json.loads(ws.receive_text())
+    assert message["type"] == "videos"
+    assert message["query"] == "sea shanty covers"
+
+
+def test_new_query_is_refused_when_generation_is_disabled(app_env):
+    app, _, _ = app_env
+    with TestClient(app) as client:
+        assert client.post("/api/new-query").status_code == 409
+
+
+def test_new_query_is_refused_without_a_gemini_key(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(GENERATING))
+    settings = Settings(youtube_api_key="K", gemini_api_key=None)
+    app = create_app(config_path=config_path, cache_dir=tmp_path / "c", settings=settings)
+    with TestClient(app) as client:
+        response = client.post("/api/new-query")
+    assert response.status_code == 503
+    assert "GEMINI_API_KEY" in response.json()["detail"]
+
+
+def test_a_gemini_failure_leaves_the_previous_query_in_place(generating_env, monkeypatch):
+    app, _, cache_dir = generating_env
+    seed_cache(cache_dir)
+
+    async def broken(theme, avoid, model, api_key=None, *, client=None):
+        raise gemini.QueryGenerationError("model unavailable")
+
+    monkeypatch.setattr(gemini, "generate_query", broken)
+    with TestClient(app) as client:
+        assert client.post("/api/new-query").status_code == 502
+        # The wall must still work off the configured query.
+        assert client.get("/api/videos").json()["query"] == "golden cover"
+
+
+def test_the_daily_budget_blocks_a_new_search(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    config_path.write_text(yaml.safe_dump({**VALID, "quota": {"daily_limit_units": 100}}))
+    budget.record_search(cache_dir)  # 100 spent, limit 100 -> next would be 200
+    stub_search(monkeypatch)
+
+    with TestClient(app) as client:
+        response = client.get("/api/videos")
+    assert response.status_code == 429
+    assert "budget" in response.json()["detail"].lower()
+
+
+def test_the_budget_serves_stale_cache_rather_than_failing_when_it_can(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    params = youtube.build_params("golden cover", "relevance", "any", "moderate", "en")
+    entry = cache_dir / f"{cache.cache_key(params)}.json"
+    payload = json.loads(entry.read_text())
+    payload["fetched_at"] = 0
+    entry.write_text(json.dumps(payload))
+    budget.record_search(cache_dir)
+    config_path.write_text(yaml.safe_dump({**VALID, "quota": {"daily_limit_units": 100}}))
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+    assert body["note"] == "budget_exceeded_stale"
+    assert body["video_ids"] == ids[:8]
+
+
+def test_the_budget_blocks_generation_before_calling_gemini(generating_env, monkeypatch):
+    app, config_path, cache_dir = generating_env
+    config_path.write_text(yaml.safe_dump({**GENERATING, "quota": {"daily_limit_units": 100}}))
+    budget.record_search(cache_dir)
+    called = []
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        called.append(theme)
+        return "should not happen"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        assert client.post("/api/new-query").status_code == 429
+    assert called == [], "Gemini must not be called when the search cannot be afforded"
+
+
+def test_a_successful_search_records_its_cost(app_env, monkeypatch):
+    app, _, cache_dir = app_env
+    stub_search(monkeypatch)
+    with TestClient(app) as client:
+        client.get("/api/videos")
+    assert budget.spent(cache_dir) == 100
+
+
+def test_a_cached_result_costs_nothing(app_env):
+    app, _, cache_dir = app_env
+    seed_cache(cache_dir)
+    with TestClient(app) as client:
+        client.get("/api/videos")
+    assert budget.spent(cache_dir) == 0
+
+
+def test_editing_the_query_by_hand_overrides_a_generated_one(generating_env, monkeypatch):
+    app, _, _ = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        return "generated thing"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+        assert client.get("/api/videos").json()["query"] == "generated thing"
+        client.put("/api/config", json={**GENERATING, "query": "typed by hand"})
+        assert client.get("/api/videos").json()["query"] == "typed by hand"
 
 
 def test_settings_require_an_api_key(monkeypatch):

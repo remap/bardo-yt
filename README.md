@@ -55,6 +55,25 @@ Because the cost is per call rather than per result, every search asks for the
 full 50 results. The first `cols × rows` fill the grid; the rest are held as a
 reserve pool and swapped in when an embed fails at play time.
 
+## Generated queries
+
+With `query_generation.enabled`, Gemini invents a fresh search query on every
+page load, seeded by `theme` and steered away from the last `avoid_repeats`
+queries so it doesn't circle back to one you already paid for. Needs
+`GEMINI_API_KEY`.
+
+**This deliberately defeats the cache.** A newly invented query has never been
+searched, so every reload spends 100 units — about 50 reloads against the
+default `quota.daily_limit_units: 5000`, and 100 against Google's real ceiling.
+The header shows the running total (`200/5000 units today`) so it is never a
+surprise.
+
+`ytmatrix/budget.py` tracks the day's spend in `cache/_budget.json` and refuses
+to search past the limit, falling back to stale cache when it can rather than
+going blank. Raise `quota.daily_limit_units`, or set it to `0`, to lift the
+guard. Typing a query by hand on `/config` overrides the generated one until
+the next reload.
+
 ## Tests
 
 ```bash
