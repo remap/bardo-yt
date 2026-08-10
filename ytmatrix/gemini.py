@@ -33,8 +33,13 @@ busking, rehearsal, backstage, studio, street, stage, workshop, on location.
 dancing, repairing -- over topics that would be illustrated by a still image.
 - Avoid words that attract static uploads: album, full album, playlist, \
 lyrics, audio, mix, compilation, soundtrack, OST, 1 hour, extended.
-- It must plausibly return dozens of results. Avoid anything so specific that \
-only one or two videos exist.
+- NAME REAL THINGS. Specific artists, groups, and song titles are wanted, not \
+avoided -- a well-known song paired with "cover", "dance practice" or "live" \
+returns dozens of different people performing it, which is exactly what fills \
+a wall. "NewJeans Ditto dance cover" is a better query than "kpop dance".
+- The only specificity to avoid is the kind that genuinely has no results: one \
+obscure b-side by an unknown act, or a named individual covering a named song.
+- Vary what you name. Do not return to the same artist or song repeatedly.
 - Do not repeat or trivially reword any query in the avoid list.
 """
 

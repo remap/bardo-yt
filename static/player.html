@@ -56,6 +56,14 @@
   #menu button .hint { color: #6f6f7a; font-size: 11px; }
   a { color: #8a8a94; margin-left: auto; }
   #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
+  /* Hidden while pre-rolling. Every cell has to play briefly to buffer, and
+     without this you watch eight videos flicker on and stop again on every
+     new query. opacity (not visibility/display) because those let the browser
+     throttle or discard the very playback we are waiting on.
+     Hiding is instant and only the reveal fades: a transition on the way out
+     leaves the outgoing set visible while the new one is already loading. */
+  #grid[data-preroll="true"] { opacity: 0; transition: none; }
+  #grid[data-preroll="false"] { opacity: 1; transition: opacity .22s ease-out; }
   /* overflow:hidden is what performs the crop -- player.js oversizes the
      iframe past the cell bounds and this clips it. */
   .cell { position: relative; background: #000; overflow: hidden; }

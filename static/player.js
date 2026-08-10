@@ -25,6 +25,9 @@ let config = null;
 let slotState = { slots: [], reserves: [] };
 let players = [];
 let apiReady = false;
+// Set once a `videos` payload has actually been applied. Until then there is
+// nothing to build and nothing to pre-roll.
+let haveVideos = false;
 
 // What the user wants playback to be doing. Distinct from what the players are
 // actually doing, which lags behind while a new set pre-rolls.
@@ -38,6 +41,10 @@ let generation = 0;
 
 const PREROLL_TIMEOUT_MS = 25000;
 const PREROLL_POLL_MS = 250;
+// pauseVideo() is not synchronous, and a seek can knock a player back into
+// playing, so the pause is confirmed rather than assumed.
+const PAUSE_CONFIRM_ATTEMPTS = 8;
+const PAUSE_CONFIRM_MS = 120;
 const LOOP_POLL_MS = 500;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -222,8 +229,12 @@ function makePlayer({ mount, videoId }, index) {
         applyCoverFit(cell);
         // Detect this video's black bars and re-crop past them once known.
         loadContentBox(cell?.dataset.videoId, cell);
-        // Starting is not this handler's job -- prerollCurrentSet() owns it,
-        // so that nothing begins until every cell is buffered.
+        // Starting is not this handler's job during pre-roll --
+        // prerollCurrentSet() owns that. The one exception is a cell rebuilt
+        // *after* the set is already running (a failed embed swapped for a
+        // reserve): it has missed pre-roll and would otherwise sit frozen
+        // while its neighbours play.
+        if (prerolled && wantPlaying) event.target.playVideo();
       },
       onError: () => handlePlayerError(index),
       onStateChange: (event) => {
@@ -273,9 +284,16 @@ function handlePlayerError(index) {
 }
 
 function rebuild() {
-  if (!apiReady || !config) return;
+  // haveVideos matters as much as the other two: resync() sets `config`
+  // before it fetches the video list, so an API-ready callback landing in
+  // between would build an empty grid and immediately declare it pre-rolled
+  // and ready -- a brief, wrong "ready" that the real set then replaces.
+  if (!apiReady || !config || !haveVideos) return;
   // Every index the open menu is holding is about to become meaningless.
   closeMenu();
+  // Hide before the new cells exist, not after: the flag must already be set
+  // by the time anything can paint.
+  gridEl.dataset.preroll = "true";
   destroyPlayers();
   const cells = buildCells();
   players = cells.map((cell, index) => makePlayer(cell, index));
@@ -301,60 +319,89 @@ function refreshControls() {
  * of the mute button, because a muted play is the only kind a browser will
  * start without a gesture; the real mute state is restored afterwards.
  */
+/**
+ * Buffer one player and stop it again as soon as *it* is ready.
+ *
+ * Deliberately per-player rather than a barrier across the set: waiting for
+ * the slowest cell before pausing any of them leaves the fast ones visibly
+ * running for seconds. Each one here plays for as little time as it takes to
+ * buffer, then parks.
+ */
+async function prerollOne(player, token, deadline) {
+  const alive = () => generation === token && Date.now() < deadline;
+  const read = (fn, fallback) => {
+    try {
+      return fn();
+    } catch {
+      return fallback;
+    }
+  };
+
+  while (alive() && typeof player.getVideoLoadedFraction !== "function") {
+    await sleep(PREROLL_POLL_MS);
+  }
+  if (!alive()) return;
+
+  read(() => player.mute());
+  read(() => player.playVideo());
+
+  // Either signal is enough: PLAYING means it has data to show, and a loaded
+  // fraction means bytes are in hand even if the state has not flipped yet.
+  while (alive()) {
+    const fraction = read(() => player.getVideoLoadedFraction(), 0);
+    const playing = read(() => player.getPlayerState(), -1) === 1;
+    if (playing || prerollComplete([fraction])) break;
+    await sleep(PREROLL_POLL_MS);
+  }
+  if (generation !== token) return;
+
+  // Stop it immediately -- this is the "pause earlier" that keeps a new query
+  // from turning into eight videos briefly bursting into life.
+  //
+  // Order matters, and it is not obvious: seekTo() RESUMES a player that is
+  // not already paused, and pauseVideo() does not take effect synchronously.
+  // Pausing first then seeking therefore restarts roughly half the wall --
+  // observed as four of eight cells still playing. Seek first, pause last,
+  // then confirm, because the seek itself can put it back into playing.
+  read(() => player.seekTo(config.playback.start_offset, true));
+  read(() => player.pauseVideo());
+
+  // 1 is PLAYING and 3 is BUFFERING -- buffering is not a resting state, it is
+  // a player on its way to playing, so both have to be chased down. Treating
+  // only state 1 as "still running" leaves cells that quietly start a moment
+  // later, which is exactly the unclean start this pre-roll exists to prevent.
+  const RUNNING_STATES = [1, 3];
+  for (let attempt = 0; attempt < PAUSE_CONFIRM_ATTEMPTS; attempt += 1) {
+    if (!RUNNING_STATES.includes(read(() => player.getPlayerState(), 2))) break;
+    await sleep(PAUSE_CONFIRM_MS);
+    read(() => player.pauseVideo());
+  }
+
+  read(() => applyMuteState(player));
+}
+
 async function prerollCurrentSet(token) {
   const set = livePlayers();
+  gridEl.dataset.preroll = "true";
+
   if (set.length === 0) {
-    prerolled = true;
-    window.__prerolled = true;
-    refreshControls();
+    finishPreroll(token);
     return;
   }
 
   setStatus(`${statusPrefix} · pre-rolling…`, "busy");
-
-  // Wait for the API to attach its methods before touching any of them.
   const deadline = Date.now() + PREROLL_TIMEOUT_MS;
-  while (Date.now() < deadline && generation === token) {
-    if (set.every((player) => typeof player.getVideoLoadedFraction === "function")) break;
-    await sleep(PREROLL_POLL_MS);
-  }
+  await Promise.all(set.map((player) => prerollOne(player, token, deadline)));
   if (generation !== token) return;
 
-  for (const player of set) {
-    try {
-      player.mute();
-      player.playVideo();
-    } catch {
-      // A player torn down mid-preroll; the generation check catches it.
-    }
-  }
+  finishPreroll(token);
+}
 
-  while (Date.now() < deadline && generation === token) {
-    const fractions = set.map((player) => {
-      try {
-        return player.getVideoLoadedFraction();
-      } catch {
-        return 0;
-      }
-    });
-    if (prerollComplete(fractions)) break;
-    await sleep(PREROLL_POLL_MS);
-  }
+function finishPreroll(token) {
   if (generation !== token) return;
-
-  // Park every player back at the start, together.
-  for (const player of set) {
-    try {
-      player.pauseVideo();
-      player.seekTo(config.playback.start_offset, true);
-      applyMuteState(player);
-    } catch {
-      // Same as above.
-    }
-  }
-
   prerolled = true;
   window.__prerolled = true;
+  gridEl.dataset.preroll = "false";
   refreshControls();
 
   // A new set starts paused unless the user asked it to follow the play state.
@@ -427,6 +474,7 @@ function applyVideos(message) {
   for (const [videoId, title] of Object.entries(message.titles ?? {})) {
     titles.set(videoId, title);
   }
+  haveVideos = true;
   slotState = splitSlots(message.video_ids.concat(message.reserves), cellCount(config.grid));
   const notes = {
     quota_exceeded_stale: "quota spent — showing cached results",

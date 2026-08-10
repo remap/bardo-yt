@@ -498,3 +498,49 @@ def test_an_empty_prompt_does_not_spend_quota(running_server):
 
         assert calls == [], "whitespace should never trigger a 100-unit generation"
         browser.close()
+
+
+def test_the_grid_is_hidden_while_pre_rolling(running_server):
+    """Every cell must play briefly to buffer; none of that should be visible.
+
+    Reported as "playstate control is unclean": on a new query the wall showed
+    eight videos starting and then stopping again.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+
+        page.wait_for_selector(".cell", timeout=20_000)
+        # Still pre-rolling: the grid must not be showing its flicker.
+        if not page.evaluate("window.__prerolled === true"):
+            assert page.evaluate("document.getElementById('grid').dataset.preroll") == "true"
+            assert page.evaluate("getComputedStyle(document.getElementById('grid')).opacity") == "0"
+
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        assert page.evaluate("document.getElementById('grid').dataset.preroll") == "false"
+        browser.close()
+
+
+def test_no_cell_is_left_running_after_pre_roll(running_server):
+    """Each player is paused as soon as it individually buffers, so no cell
+    sits playing while the slowest one catches up."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        # State alone is not proof: a cell can report BUFFERING (3) and start
+        # playing a moment later. Advancing playback time is the ground truth.
+        first = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+        page.wait_for_timeout(2500)
+        second = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+
+        advanced = [(i, a, b) for i, (a, b) in enumerate(zip(first, second)) if b - a > 0.5]
+        assert advanced == [], f"cells kept playing after pre-roll: {advanced}"
+
+        states = page.evaluate("window.__players.map(p => p.getPlayerState())")
+        assert all(s != 1 for s in states), f"a cell reports PLAYING: {states}"
+        assert all(t < 3 for t in second), f"players drifted instead of parking: {second}"
+        browser.close()
