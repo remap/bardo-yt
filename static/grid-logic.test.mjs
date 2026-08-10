@@ -9,7 +9,42 @@ import {
   shouldRestart,
   prerollComplete,
   LOOP_GUARD_SECONDS,
+  videoUrl,
+  formatTimecode,
 } from "./grid-logic.js";
+
+test("videoUrl includes the timestamp in whole seconds", () => {
+  assert.equal(videoUrl("abc123", 96.7), "https://youtu.be/abc123?t=96");
+});
+
+test("videoUrl omits the timestamp at the very start", () => {
+  // ?t=0 is noise; a bare link means the same thing.
+  assert.equal(videoUrl("abc123", 0), "https://youtu.be/abc123");
+  assert.equal(videoUrl("abc123", 0.4), "https://youtu.be/abc123");
+});
+
+test("videoUrl omits the timestamp when there is no reading", () => {
+  assert.equal(videoUrl("abc123"), "https://youtu.be/abc123");
+  assert.equal(videoUrl("abc123", null), "https://youtu.be/abc123");
+  assert.equal(videoUrl("abc123", NaN), "https://youtu.be/abc123");
+});
+
+test("formatTimecode renders minutes and seconds", () => {
+  assert.equal(formatTimecode(0), "0:00");
+  assert.equal(formatTimecode(9), "0:09");
+  assert.equal(formatTimecode(96.7), "1:36");
+  assert.equal(formatTimecode(600), "10:00");
+});
+
+test("formatTimecode renders hours only when there are some", () => {
+  assert.equal(formatTimecode(3661), "1:01:01");
+  assert.equal(formatTimecode(3599), "59:59");
+});
+
+test("formatTimecode survives a missing reading", () => {
+  assert.equal(formatTimecode(NaN), "0:00");
+  assert.equal(formatTimecode(-5), "0:00");
+});
 
 // Looping before the end, so end-screen cards never get drawn.
 

@@ -6,6 +6,8 @@ import {
   coverRect,
   shouldRestart,
   prerollComplete,
+  videoUrl,
+  formatTimecode,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
@@ -16,6 +18,8 @@ const pauseButton = document.getElementById("pause");
 const muteButton = document.getElementById("mute");
 const newQueryButton = document.getElementById("new-query");
 const followCheckbox = document.getElementById("follow");
+const promptInput = document.getElementById("prompt");
+const menuEl = document.getElementById("menu");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
@@ -89,6 +93,10 @@ const cellResizeObserver = new ResizeObserver((entries) => {
 // id. Populated asynchronously; until it arrives a cell simply uses plain
 // cover-fit, which is what it did before this existed.
 const contentBoxes = new Map();
+
+// video id -> title, so the context menu can name what you right-clicked
+// without another round trip.
+const titles = new Map();
 
 async function loadContentBox(videoId, cell) {
   if (!videoId || contentBoxes.has(videoId)) return;
@@ -266,6 +274,8 @@ function handlePlayerError(index) {
 
 function rebuild() {
   if (!apiReady || !config) return;
+  // Every index the open menu is holding is about to become meaningless.
+  closeMenu();
   destroyPlayers();
   const cells = buildCells();
   players = cells.map((cell, index) => makePlayer(cell, index));
@@ -414,6 +424,9 @@ function applyInPlace() {
 }
 
 function applyVideos(message) {
+  for (const [videoId, title] of Object.entries(message.titles ?? {})) {
+    titles.set(videoId, title);
+  }
   slotState = splitSlots(message.video_ids.concat(message.reserves), cellCount(config.grid));
   const notes = {
     quota_exceeded_stale: "quota spent — showing cached results",
@@ -442,11 +455,15 @@ let requestedNewThisPageLoad = false;
 let seededMuteFromConfig = false;
 let seededFollowFromConfig = false;
 
-async function requestNewQuery() {
+async function requestNewQuery(prompt = null) {
   newQueryButton.disabled = true;
-  setStatus("inventing a query…");
+  setStatus(prompt ? `inventing a query from “${prompt}”…` : "inventing a query…", "busy");
   try {
-    const response = await fetch("/api/new-query", { method: "POST" });
+    const response = await fetch("/api/new-query", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(prompt ? { prompt } : {}),
+    });
     if (response.ok) {
       applyVideos(await response.json());
       return true;
@@ -497,7 +514,170 @@ async function resync() {
   applyVideos(await videosResponse.json());
 }
 
-newQueryButton.addEventListener("click", requestNewQuery);
+newQueryButton.addEventListener("click", () => requestNewQuery());
+
+// The prompt box is a metaprompt, not a raw search: what you type goes to
+// Gemini together with the app's standing guidance, so "sadder, more piano"
+// comes back as a query that actually returns a wall's worth of moving video.
+promptInput.addEventListener("keydown", async (event) => {
+  if (event.key !== "Enter") return;
+  const prompt = promptInput.value.trim();
+  if (!prompt) return;
+  promptInput.disabled = true;
+  try {
+    await requestNewQuery(prompt);
+  } finally {
+    promptInput.disabled = false;
+    promptInput.focus();
+  }
+});
+
+// --- per-cell context menu -------------------------------------------------
+//
+// The iframe has pointer-events:none (so hovering cannot summon YouTube's own
+// overlay), which leaves the cell itself free to receive the right-click. That
+// is the only reason a custom menu is possible here at all.
+
+let menuTarget = null;
+
+function closeMenu() {
+  menuEl.hidden = true;
+  menuTarget = null;
+}
+
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(text);
+    setStatus(`copied ${label}`, "busy");
+    setTimeout(() => setStatus(statusPrefix), 1600);
+  } catch {
+    setStatus("clipboard blocked by the browser", "error");
+  }
+}
+
+function playerForCell(cell) {
+  const index = [...gridEl.children].indexOf(cell);
+  return { index, player: index >= 0 ? players[index] : null };
+}
+
+function menuItems(cell) {
+  const { index, player } = playerForCell(cell);
+  const videoId = cell.dataset.videoId;
+  if (!videoId) return [];
+
+  let time = 0;
+  let isMuted = muted;
+  let state = -1;
+  try {
+    time = player?.getCurrentTime?.() ?? 0;
+    isMuted = player?.isMuted?.() ?? muted;
+    state = player?.getPlayerState?.() ?? -1;
+  } catch {
+    // A player mid-teardown still gets a useful, if plainer, menu.
+  }
+  const playing = state === 1;
+
+  return [
+    {
+      label: "Copy video URL at time",
+      hint: formatTimecode(time),
+      run: () => copyText(videoUrl(videoId, time), `URL at ${formatTimecode(time)}`),
+    },
+    {
+      label: "Copy video URL",
+      run: () => copyText(videoUrl(videoId), "URL"),
+    },
+    {
+      label: "Copy video ID",
+      hint: videoId,
+      run: () => copyText(videoId, "video ID"),
+    },
+    {
+      label: "Copy title",
+      run: () => copyText(titles.get(videoId) ?? videoId, "title"),
+    },
+    {
+      label: "Open on YouTube at time",
+      run: () => window.open(videoUrl(videoId, time), "_blank", "noopener"),
+    },
+    {
+      label: playing ? "Pause this cell" : "Play this cell",
+      run: () => (playing ? player?.pauseVideo?.() : player?.playVideo?.()),
+    },
+    {
+      label: isMuted ? "Unmute this cell" : "Mute this cell",
+      run: () => (isMuted ? player?.unMute?.() : player?.mute?.()),
+    },
+    {
+      label: "Restart this cell",
+      run: () => player?.seekTo?.(config.playback.start_offset, true),
+    },
+    {
+      label: "Replace with next reserve",
+      hint: `${slotState.reserves.length} left`,
+      run: () => handlePlayerError(index),
+    },
+  ];
+}
+
+function openMenu(cell, x, y) {
+  const items = menuItems(cell);
+  if (items.length === 0) return;
+
+  menuEl.replaceChildren();
+  const head = document.createElement("div");
+  head.className = "head";
+  head.textContent = titles.get(cell.dataset.videoId) ?? cell.dataset.videoId;
+  menuEl.appendChild(head);
+
+  for (const item of items) {
+    const button = document.createElement("button");
+    const label = document.createElement("span");
+    label.textContent = item.label;
+    button.appendChild(label);
+    if (item.hint) {
+      const hint = document.createElement("span");
+      hint.className = "hint";
+      hint.textContent = item.hint;
+      button.appendChild(hint);
+    }
+    button.addEventListener("click", () => {
+      item.run();
+      closeMenu();
+    });
+    menuEl.appendChild(button);
+  }
+
+  menuTarget = cell;
+  menuEl.hidden = false;
+  // Place it, then nudge back inside the viewport if it would overhang.
+  menuEl.style.left = `${x}px`;
+  menuEl.style.top = `${y}px`;
+  const rect = menuEl.getBoundingClientRect();
+  if (rect.right > window.innerWidth) {
+    menuEl.style.left = `${Math.max(0, window.innerWidth - rect.width - 4)}px`;
+  }
+  if (rect.bottom > window.innerHeight) {
+    menuEl.style.top = `${Math.max(0, window.innerHeight - rect.height - 4)}px`;
+  }
+}
+
+gridEl.addEventListener("contextmenu", (event) => {
+  const cell = event.target.closest(".cell");
+  if (!cell || cell.dataset.empty === "true") return;
+  event.preventDefault();
+  openMenu(cell, event.clientX, event.clientY);
+});
+
+document.addEventListener("click", (event) => {
+  if (!menuEl.hidden && !menuEl.contains(event.target)) closeMenu();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") closeMenu();
+});
+window.addEventListener("blur", closeMenu);
+// A rebuild invalidates every index the open menu was holding.
+window.addEventListener("resize", closeMenu);
 
 // Eight players starting at once is exactly what browsers throttle; this click
 // is the user gesture that makes them all start. It is disabled until the set

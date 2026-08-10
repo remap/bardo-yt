@@ -7,7 +7,7 @@ import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, letterbox, motion, server, youtube
+from ytmatrix import budget, cache, gemini, letterbox, motion, querylog, server, youtube
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
 
@@ -283,7 +283,7 @@ def test_new_query_puts_the_generated_query_on_the_wall(generating_env, monkeypa
     app, _, _ = generating_env
     stub_search(monkeypatch)
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         return "shoegaze motown covers"
 
     monkeypatch.setattr(gemini, "generate_query", fake_generate)
@@ -297,7 +297,7 @@ def test_the_generated_query_persists_for_later_requests(generating_env, monkeyp
     app, _, _ = generating_env
     stub_search(monkeypatch)
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         return "bossa nova covers"
 
     monkeypatch.setattr(gemini, "generate_query", fake_generate)
@@ -312,7 +312,7 @@ def test_each_generation_is_told_what_was_already_used(generating_env, monkeypat
     seen = []
     counter = iter(range(100))
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         seen.append(list(avoid))
         return f"query {next(counter)}"
 
@@ -331,7 +331,7 @@ def test_new_query_broadcasts_to_the_wall(generating_env, monkeypatch):
     app, _, _ = generating_env
     stub_search(monkeypatch)
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         return "sea shanty covers"
 
     monkeypatch.setattr(gemini, "generate_query", fake_generate)
@@ -363,7 +363,7 @@ def test_a_gemini_failure_leaves_the_previous_query_in_place(generating_env, mon
     app, _, cache_dir = generating_env
     seed_cache(cache_dir)
 
-    async def broken(theme, avoid, model, api_key=None, *, client=None):
+    async def broken(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         raise gemini.QueryGenerationError("model unavailable")
 
     monkeypatch.setattr(gemini, "generate_query", broken)
@@ -408,7 +408,7 @@ def test_the_budget_blocks_generation_before_calling_gemini(generating_env, monk
     budget.record_search(cache_dir)
     called = []
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         called.append(theme)
         return "should not happen"
 
@@ -438,7 +438,7 @@ def test_editing_the_query_by_hand_overrides_a_generated_one(generating_env, mon
     app, _, _ = generating_env
     stub_search(monkeypatch)
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         return "generated thing"
 
     monkeypatch.setattr(gemini, "generate_query", fake_generate)
@@ -453,7 +453,7 @@ def test_the_generated_query_survives_a_server_restart(generating_env, monkeypat
     app, config_path, cache_dir = generating_env
     stub_search(monkeypatch)
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         return "persisted query"
 
     monkeypatch.setattr(gemini, "generate_query", fake_generate)
@@ -474,7 +474,7 @@ def test_a_restart_does_not_spend_quota_to_show_the_same_wall(generating_env, mo
     app, config_path, cache_dir = generating_env
     stub_search(monkeypatch)
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         return "persisted query"
 
     monkeypatch.setattr(gemini, "generate_query", fake_generate)
@@ -502,7 +502,7 @@ def test_history_survives_a_restart_so_gemini_keeps_avoiding_old_queries(
     seen = []
     counter = iter(range(100))
 
-    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
         seen.append(list(avoid))
         return f"query {next(counter)}"
 
@@ -714,3 +714,144 @@ def test_settings_require_an_api_key(monkeypatch):
     monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
     with pytest.raises(ValidationError, match="youtube_api_key|YOUTUBE_API_KEY"):
         Settings(_env_file=None)
+
+
+# --- manual metaprompt + query logging -------------------------------------
+
+
+@pytest.fixture
+def logging_env(tmp_path):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(GENERATING))
+    cache_dir = tmp_path / "cache"
+    log_dir = tmp_path / "logs"
+    settings = Settings(youtube_api_key="TEST_KEY", gemini_api_key="GEMINI_KEY")
+    app = create_app(
+        config_path=config_path, cache_dir=cache_dir, settings=settings, log_dir=log_dir
+    )
+    return app, cache_dir, log_dir
+
+
+def test_a_manual_prompt_is_passed_to_gemini_as_guidance(logging_env, monkeypatch):
+    app, _, _ = logging_env
+    stub_search(monkeypatch)
+    seen = {}
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        seen["instruction"] = instruction
+        seen["theme"] = theme
+        return "sad piano covers live"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        body = client.post("/api/new-query", json={"prompt": "something sadder"}).json()
+
+    assert seen["instruction"] == "something sadder"
+    # The standing theme still goes along: the prompt steers, it does not replace.
+    assert seen["theme"] == GENERATING["query_generation"]["theme"]
+    assert body["query"] == "sad piano covers live"
+
+
+def test_a_blank_prompt_is_treated_as_no_prompt(logging_env, monkeypatch):
+    app, _, _ = logging_env
+    stub_search(monkeypatch)
+    seen = {}
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        seen["instruction"] = instruction
+        return "q"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query", json={"prompt": "   "})
+    assert seen["instruction"] is None
+
+
+def test_new_query_still_works_with_no_body_at_all(logging_env, monkeypatch):
+    app, _, _ = logging_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        return "q"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        assert client.post("/api/new-query").status_code == 200
+
+
+def test_every_resolution_is_logged(logging_env, monkeypatch):
+    app, cache_dir, log_dir = logging_env
+    seed_cache(cache_dir)
+
+    with TestClient(app) as client:
+        client.get("/api/videos")
+        client.get("/api/videos")
+
+    entries = querylog.read_all(log_dir)
+    assert len(entries) == 2, "plain reloads must be recorded too"
+    assert all(e["from_cache"] is True for e in entries)
+
+
+def test_the_log_records_the_query_and_its_results(logging_env, monkeypatch):
+    app, cache_dir, log_dir = logging_env
+    ids = seed_cache(cache_dir)
+
+    with TestClient(app) as client:
+        client.get("/api/videos")
+
+    entry = querylog.read_all(log_dir)[0]
+    assert entry["query"] == "golden cover"
+    assert [r["video_id"] for r in entry["results"]] == ids[:8]
+    assert entry["count"] == 8
+    assert entry["units_spent_today"] == 0
+
+
+def test_a_manual_query_is_logged_with_its_prompt_and_source(logging_env, monkeypatch):
+    app, _, log_dir = logging_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        return "generated from prompt"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query", json={"prompt": "more guitars"})
+
+    entry = querylog.read_all(log_dir)[-1]
+    assert entry["source"] == "manual"
+    assert entry["prompt"] == "more guitars"
+    assert entry["query"] == "generated from prompt"
+
+
+def test_an_unprompted_generation_is_logged_as_generated(logging_env, monkeypatch):
+    app, _, log_dir = logging_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        return "invented"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+
+    entry = querylog.read_all(log_dir)[-1]
+    assert entry["source"] == "generated"
+    assert "prompt" not in entry
+
+
+def test_the_log_accumulates_across_restarts(logging_env, monkeypatch):
+    app, cache_dir, log_dir = logging_env
+    seed_cache(cache_dir)
+    with TestClient(app) as client:
+        client.get("/api/videos")
+
+    restarted = create_app(
+        config_path=log_dir.parent / "config.yaml",
+        cache_dir=cache_dir,
+        settings=Settings(youtube_api_key="K", gemini_api_key="G"),
+        log_dir=log_dir,
+    )
+    with TestClient(restarted) as client:
+        client.get("/api/videos")
+
+    assert len(querylog.read_all(log_dir)) == 2, "the log must not be truncated on restart"

@@ -191,3 +191,24 @@ def test_the_license_filter_changes_the_cache_key_inputs():
     plain = youtube.build_params("q", "relevance", "any", "moderate", None)
     cc = youtube.build_params("q", "relevance", "any", "moderate", None, "creativeCommon")
     assert plain != cc, "a license change must not silently reuse cached results"
+
+
+async def test_html_entities_in_titles_are_decoded():
+    # The Data API returns titles HTML-escaped. Left raw, they surface as
+    # "Rumi &amp; Jinu" in the context menu, in Copy title, and in the log.
+    payload = {
+        "items": [
+            {
+                "id": {"videoId": "aaa"},
+                "snippet": {
+                    "title": "Rumi &amp; Jinu &#39;Golden&#39; (KPOP) &quot;Cover&quot;",
+                    "channelTitle": "kameko &amp; Rica",
+                },
+            }
+        ]
+    }
+    client, _ = client_returning(httpx.Response(200, json=payload))
+    async with client:
+        items = await youtube.search({"q": "x"}, "KEY", client=client)
+    assert items[0]["title"] == "Rumi & Jinu 'Golden' (KPOP) \"Cover\""
+    assert items[0]["channel"] == "kameko & Rica"

@@ -82,6 +82,24 @@ export function prerollComplete(fractions, minFraction = PREROLL_MIN_FRACTION) {
   return fractions.every((fraction) => (fraction ?? 0) >= minFraction);
 }
 
+// youtu.be takes the timestamp as whole seconds on `t`; fractional values are
+// ignored by the player, so round rather than hand it something it drops.
+export function videoUrl(videoId, seconds = null) {
+  const base = `https://youtu.be/${videoId}`;
+  if (seconds === null || !Number.isFinite(seconds) || seconds < 1) return base;
+  return `${base}?t=${Math.floor(seconds)}`;
+}
+
+export function formatTimecode(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const whole = Math.floor(seconds);
+  const hours = Math.floor(whole / 3600);
+  const minutes = Math.floor((whole % 3600) / 60);
+  const secs = whole % 60;
+  const pad = (n) => String(n).padStart(2, "0");
+  return hours ? `${hours}:${pad(minutes)}:${pad(secs)}` : `${minutes}:${pad(secs)}`;
+}
+
 const REBUILD_KEYS = ["grid"];
 const IN_PLACE_KEYS = ["playback"];
 

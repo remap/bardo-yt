@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, letterbox, motion, wallstate, youtube
+from ytmatrix import budget, cache, gemini, letterbox, motion, querylog, wallstate, youtube
 from ytmatrix.config import Config, load_config, save_config
 from ytmatrix.settings import Settings
 from ytmatrix.ws import ConnectionManager
@@ -142,9 +142,12 @@ def videos_message(
     }
 
 
-def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAPI:
+def create_app(
+    config_path: Path, cache_dir: Path, settings: Settings, log_dir: Path | None = None
+) -> FastAPI:
     app = FastAPI(title="yt matrix")
     manager = ConnectionManager()
+    log_dir = log_dir if log_dir is not None else config_path.parent / "logs"
 
     # The query actually on the wall, restored from disk so a restart or a
     # reload keeps showing what it was showing -- reloads are free, and only an
@@ -156,9 +159,13 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
     def effective_query(config: Config) -> str:
         return state["query"] or config.query
 
-    async def current_videos() -> dict:
+    async def current_videos(source: str | None = None, prompt: str | None = None) -> dict:
         config = load_config(config_path)
         query = effective_query(config)
+        # Every resolution is logged, including plain reloads: the log is a
+        # record of what was on the wall and when, not just of what was newly
+        # searched. `from_cache` distinguishes the two.
+        source = source or ("generated" if state["query"] else "config")
         try:
             resolved = await resolve_videos(config, cache_dir, settings.youtube_api_key, query)
         except BudgetExceededError as exc:
@@ -172,7 +179,24 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         video_ids = [item["video_id"] for item in resolved["items"]]
         selection = await select_videos(config, video_ids, cache_dir)
-        return videos_message(config, resolved, query, cache_dir, selection)
+        message = videos_message(config, resolved, query, cache_dir, selection)
+
+        querylog.append(
+            log_dir,
+            querylog.build_entry(
+                query=query,
+                source=source,
+                video_ids=message["video_ids"],
+                titles=message["titles"],
+                from_cache=message["from_cache"],
+                units_spent_today=message["units_spent_today"],
+                reserves=len(message["reserves"]),
+                static_relaxed=message["static_relaxed"],
+                prompt=prompt,
+                note=message["note"],
+            ),
+        )
+        return message
 
     @app.get("/healthz")
     async def healthz() -> dict:
@@ -283,13 +307,23 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
         return box
 
     @app.post("/api/new-query")
-    async def new_query() -> dict:
+    async def new_query(payload: dict | None = None) -> dict:
         """Invent a fresh query with Gemini and put it on the wall.
 
-        Called once per page load by the player, not on every WebSocket
-        reconnect: a reconnect is a network hiccup, and spending 100 units
-        every time the wifi blinks would drain the day's budget silently.
+        An optional `prompt` is the operator's steer -- a metaprompt, not a
+        raw query. It goes to Gemini together with the app's standing guidance
+        (return things that move, avoid static-upload words, must return dozens
+        of results), so "sad piano" comes back as a usable search rather than
+        being pasted straight into YouTube.
+
+        Never called implicitly: only the New query button, ?new=true, or the
+        prompt box. A generated query is a cache miss by definition and costs
+        100 units.
         """
+        raw_prompt = (payload or {}).get("prompt")
+        # Whitespace-only is no prompt at all -- normalise to None so "manual"
+        # never gets recorded for an empty box.
+        prompt = raw_prompt.strip() or None if isinstance(raw_prompt, str) else None
         config = load_config(config_path)
         if not config.query_generation.enabled:
             raise HTTPException(status_code=409, detail="query_generation.enabled is false")
@@ -315,6 +349,7 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
                 state["history"][-config.query_generation.avoid_repeats :],
                 config.query_generation.model,
                 settings.gemini_api_key,
+                instruction=prompt,
             )
         except gemini.QueryGenerationError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
@@ -322,7 +357,7 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
         state["query"] = query
         state["history"].append(query)
         wallstate.save(cache_dir, state)
-        message = await current_videos()
+        message = await current_videos(source="manual" if prompt else "generated", prompt=prompt)
         await manager.broadcast(message)
         return message
 

@@ -73,6 +73,44 @@ by construction and costs 100 units. It takes an explicit act:
 Everything else is free. The current query is persisted to `cache/_wall.json`,
 so a plain reload — or a server restart — restores the same wall at zero cost.
 
+### Steering it
+
+The box in the header is a **metaprompt**, not a raw search. What you type goes
+to Gemini alongside the app's standing guidance (return things that move, avoid
+static-upload words, must return dozens of results), so `sadder, more piano`
+comes back as a usable query rather than being pasted straight into YouTube.
+Press Enter. It costs 100 units, same as any other generation.
+
+## Query log
+
+Every resolution is appended to `logs/queries.jsonl` — one JSON object per
+line, gitignored, never truncated. Each record carries a local timestamp with
+an explicit UTC offset, the query, where it came from (`generated`, `manual`
+with the prompt that produced it, or `config`), whether it came from cache, and
+the full result list with titles:
+
+```json
+{"at":"2026-08-10T15:53:22-07:00","query":"kpop solo ballad live performance",
+ "source":"manual","prompt":"slower and more melancholy, solo performers",
+ "from_cache":false,"count":8,"units_spent_today":1700,"results":[…]}
+```
+
+Plain reloads are logged too — the file is a record of what was on the wall and
+when, not only of what was newly searched. `from_cache` tells the two apart.
+
+## Right-click a cell
+
+The iframe has `pointer-events: none` (which is what stops YouTube's hover
+chrome appearing), and that is exactly what leaves the cell free to take a
+right-click. The menu offers:
+
+- **Copy video URL at time** — `https://youtu.be/<id>?t=96`, at the position
+  that cell is actually at
+- Copy video URL / video ID / title
+- Open on YouTube at time
+- Play, pause, mute, unmute or restart **that one cell**
+- Replace it with the next video from the reserve pool
+
 `ytmatrix/budget.py` tracks the day's spend in `cache/_budget.json` and refuses
 to search past the limit, falling back to stale cache when it can rather than
 going blank. Raise `quota.daily_limit_units`, or set it to `0`, to lift the

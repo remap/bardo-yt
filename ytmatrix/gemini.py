@@ -53,12 +53,21 @@ class QueryGenerationError(RuntimeError):
     """Gemini did not return a usable query."""
 
 
-def build_prompt(theme: str, avoid: list[str]) -> str:
+def build_prompt(theme: str, avoid: list[str], instruction: str | None = None) -> str:
     recent = avoid[-MAX_AVOID_ENTRIES:]
     parts = [f"Theme: {theme}"]
+    if instruction:
+        # The operator's steer wins over the standing theme, but the rules
+        # above still apply -- this is a metaprompt, not a raw query. Typing
+        # "sad piano" should still come back as something that returns dozens
+        # of moving results.
+        parts.append(
+            "The operator has asked for this specifically, and it takes "
+            f"precedence over the theme:\n{instruction}"
+        )
     if recent:
         parts.append("Avoid these, already used:\n" + "\n".join(f"- {q}" for q in recent))
-    parts.append("Invent one new search query that fits the theme.")
+    parts.append("Invent one new search query.")
     return "\n\n".join(parts)
 
 
@@ -68,10 +77,11 @@ async def generate_query(
     model: str = DEFAULT_MODEL,
     api_key: str | None = None,
     *,
+    instruction: str | None = None,
     client=None,
 ) -> str:
     client = client or genai.Client(api_key=api_key)
-    prompt = build_prompt(theme, avoid)
+    prompt = build_prompt(theme, avoid, instruction)
     try:
         response = await client.aio.models.generate_content(
             model=model,

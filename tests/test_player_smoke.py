@@ -398,3 +398,103 @@ def test_every_iframe_covers_its_cell_with_no_letterboxing(running_server):
             assert m["centredX"] < 1.5, f"cell {i} crop off-centre by {m['centredX']}px"
             assert m["centredY"] < 1.5, f"cell {i} crop off-centre by {m['centredY']}px"
         browser.close()
+
+
+def test_right_click_offers_copy_url_at_time(running_server):
+    """The iframe has pointer-events:none, which is what frees the cell to
+    receive a right-click at all. If that CSS ever goes, so does this menu."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        context = browser.new_context(
+            ignore_https_errors=True, permissions=["clipboard-read", "clipboard-write"]
+        )
+        page = context.new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        page.click("#play")
+        page.wait_for_timeout(3500)  # let a few seconds of video elapse
+
+        page.locator(".cell").first.click(button="right")
+        page.wait_for_selector("#menu:not([hidden])", timeout=5_000)
+
+        labels = page.eval_on_selector_all(
+            "#menu button span:first-child", "e => e.map(x => x.textContent)"
+        )
+        assert "Copy video URL at time" in labels
+        assert "Copy video URL" in labels
+        assert "Open on YouTube at time" in labels
+        assert any(label.endswith("this cell") for label in labels)
+
+        page.locator("#menu button", has_text="Copy video URL at time").first.click()
+        # state="hidden": the default waits for visibility, which a hidden
+        # element can never satisfy.
+        page.wait_for_selector("#menu", state="hidden", timeout=5_000)
+
+        copied = page.evaluate("navigator.clipboard.readText()")
+        assert copied.startswith("https://youtu.be/"), copied
+        assert "?t=" in copied, f"timestamp missing: {copied}"
+        seconds = int(copied.split("?t=")[1])
+        assert seconds >= 1, f"expected a real playback position, got {seconds}"
+        browser.close()
+
+
+def test_right_click_on_an_empty_cell_does_nothing(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        page.evaluate("""
+            const cell = document.querySelector('.cell');
+            cell.dataset.empty = 'true';
+            delete cell.dataset.videoId;
+        """)
+        page.locator(".cell").first.click(button="right")
+        page.wait_for_timeout(500)
+        assert page.locator("#menu").is_hidden()
+        browser.close()
+
+
+def test_the_prompt_box_sends_a_metaprompt_on_enter(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        sent = {}
+        page.route(
+            "**/api/new-query",
+            lambda route: (
+                sent.update({"body": route.request.post_data}),
+                route.fulfill(status=409, json={"detail": "stubbed"}),
+            )[-1],
+        )
+        page.fill("#prompt", "sadder, more piano")
+        page.press("#prompt", "Enter")
+        page.wait_for_function("Object.keys(window).length >= 0", timeout=2_000)
+        page.wait_for_timeout(1200)
+
+        assert sent, "Enter did not trigger a request"
+        assert '"prompt"' in sent["body"]
+        assert "sadder, more piano" in sent["body"]
+        browser.close()
+
+
+def test_an_empty_prompt_does_not_spend_quota(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        calls = []
+        page.route("**/api/new-query", lambda route: (calls.append(1), route.abort())[-1])
+        page.fill("#prompt", "   ")
+        page.press("#prompt", "Enter")
+        page.wait_for_timeout(1000)
+
+        assert calls == [], "whitespace should never trigger a 100-unit generation"
+        browser.close()

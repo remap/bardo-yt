@@ -30,6 +30,30 @@
     color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
   }
   #follow-label input { cursor: pointer; }
+  #prompt {
+    font: inherit; padding: 7px 11px; border-radius: 6px; min-width: 230px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+  }
+  #prompt:focus { outline: none; border-color: #5a5a68; }
+  #prompt:disabled { opacity: .5; }
+  #menu {
+    position: fixed; z-index: 50; min-width: 236px; padding: 5px;
+    background: #17171c; border: 1px solid #34343d; border-radius: 8px;
+    box-shadow: 0 10px 30px #000a; font-size: 13px;
+  }
+  #menu[hidden] { display: none; }
+  #menu .head {
+    padding: 6px 10px 8px; color: #6f6f7a; font-size: 11px;
+    border-bottom: 1px solid #26262d; margin-bottom: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #menu button {
+    display: flex; justify-content: space-between; gap: 16px; width: 100%;
+    padding: 7px 10px; border: 0; border-radius: 5px; background: none;
+    color: #e8e8ea; font: inherit; font-weight: 400; text-align: left; cursor: pointer;
+  }
+  #menu button:hover { background: #262630; }
+  #menu button .hint { color: #6f6f7a; font-size: 11px; }
   a { color: #8a8a94; margin-left: auto; }
   #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
   /* overflow:hidden is what performs the crop -- player.js oversizes the
@@ -56,6 +80,9 @@
     <button id="new-query" title="Invents a new query with Gemini. Costs 100 quota units.">
       New query
     </button>
+    <input id="prompt" type="text" spellcheck="false"
+           placeholder="steer the next query… (Enter)"
+           title="A metaprompt: Gemini turns this into a search query using the app's guidance. Costs 100 quota units.">
     <label id="follow-label" title="When off, a new query loads paused and waits for you.">
       <input type="checkbox" id="follow"> follow play state
     </label>
@@ -63,6 +90,7 @@
     <a href="/config">config →</a>
   </header>
   <div id="grid"></div>
+  <div id="menu" hidden></div>
   <script src="https://www.youtube.com/iframe_api"></script>
   <script type="module" src="/static/player.js"></script>
 </body>

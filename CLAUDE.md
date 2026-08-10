@@ -34,6 +34,7 @@ directory as a module on Node 23 and fails.
 | `ytmatrix/wallstate.py` | Persists the current query + history so reloads and restarts cost nothing. |
 | `ytmatrix/letterbox.py` | Finds the picture inside a boxed 16:9 frame, from the video's thumbnail. |
 | `ytmatrix/motion.py` | Scores real video vs. still-image-with-audio from storyboard frames; ranks the wall. |
+| `ytmatrix/querylog.py` | Append-only JSONL record of every query and its results, local-time stamped. |
 | `ytmatrix/server.py` | FastAPI routes, WS fan-out, and the cache-first `resolve_videos` that wires the three above. |
 | `ytmatrix/settings.py` | Env/secrets. `YOUTUBE_API_KEY` lives here, never in `config.yaml`. |
 | `ytmatrix/certs.py` | Self-signed cert generation (copied from layout-driver). |
@@ -111,6 +112,21 @@ directory as a module on Node 23 and fails.
     ENDED fires the cards are already visible. The interval in `player.js`
     seeks back `LOOP_GUARD_SECONDS` short of the end. The ENDED handler is a
     backstop for when one slips through, not the mechanism.
+
+21. **`pointer-events: none` on the iframe is load-bearing twice over.** It
+    stops YouTube's hover chrome (gotcha 7) *and* it is the only reason the
+    cell can receive a right-click, which is what the context menu is built
+    on. Removing it breaks both at once.
+
+22. **Titles arrive HTML-escaped from the Data API** — `Rumi &amp; Jinu`,
+    `&#39;`. `youtube.py` runs `html.unescape` once at the boundary so nothing
+    downstream has to know. Do not escape them again on the way out; the
+    context menu and the log both use `textContent`/JSON, not innerHTML.
+
+23. **The prompt box is a metaprompt, not a query.** It is passed to Gemini as
+    `instruction` alongside the standing theme and all the usual rules, so the
+    result is still a search that returns dozens of moving videos. Do not
+    "simplify" it into sending the raw text to YouTube.
 
 20. **Ads cannot be disabled or skipped — the API has no control over them.**
     `video_duration: short` avoids mid-rolls (YouTube only allows them at 8

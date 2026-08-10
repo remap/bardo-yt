@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 
 import httpx
 
@@ -78,8 +79,11 @@ def _flatten(payload: dict) -> list[dict]:
         items.append(
             {
                 "video_id": video_id,
-                "title": snippet.get("title", ""),
-                "channel": snippet.get("channelTitle", ""),
+                # The API returns titles HTML-escaped -- "Rumi &amp; Jinu",
+                # "&#39;". Decode once here so nothing downstream (the context
+                # menu, Copy title, the query log) has to know or care.
+                "title": html.unescape(snippet.get("title", "")),
+                "channel": html.unescape(snippet.get("channelTitle", "")),
             }
         )
     return items

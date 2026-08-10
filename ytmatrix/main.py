@@ -39,6 +39,7 @@ def main() -> None:
         config_path=Path(os.environ.get("YTMATRIX_CONFIG_PATH", REPO_ROOT / "config.yaml")),
         cache_dir=Path(os.environ.get("YTMATRIX_CACHE_DIR", REPO_ROOT / "cache")),
         settings=settings,
+        log_dir=Path(os.environ.get("YTMATRIX_LOG_DIR", REPO_ROOT / "logs")),
     )
     uvicorn.run(
         app,
