@@ -28,6 +28,26 @@ export function substituteFailedSlot(state, cellIndex) {
   return { slots, reserves, replaced: replacement !== undefined };
 }
 
+// A YouTube iframe always renders 16:9 internally and letterboxes itself
+// inside any other shape. To fill a cell instead, oversize the iframe to the
+// smallest 16:9 box that covers the cell and centre it; the cell clips the
+// overflow. This is CSS `object-fit: cover` done by hand, because an iframe is
+// not a replaced element and object-fit does nothing to it.
+export const VIDEO_ASPECT_W = 16;
+export const VIDEO_ASPECT_H = 9;
+
+export function coverRect(cellWidth, cellHeight) {
+  const scale = Math.max(cellWidth / VIDEO_ASPECT_W, cellHeight / VIDEO_ASPECT_H);
+  const width = VIDEO_ASPECT_W * scale;
+  const height = VIDEO_ASPECT_H * scale;
+  return {
+    width,
+    height,
+    left: (cellWidth - width) / 2,
+    top: (cellHeight - height) / 2,
+  };
+}
+
 const REBUILD_KEYS = ["grid"];
 const IN_PLACE_KEYS = ["playback"];
 

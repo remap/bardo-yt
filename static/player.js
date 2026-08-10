@@ -3,18 +3,39 @@ import {
   substituteFailedSlot,
   classifyConfigChange,
   cellCount,
+  coverRect,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
 const gridEl = document.getElementById("grid");
 const statusEl = document.getElementById("status");
 const playButton = document.getElementById("play");
+const pauseButton = document.getElementById("pause");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
 let players = [];
 let apiReady = false;
 let hasPlayed = false;
+let paused = false;
+
+// Re-crop whenever a cell changes size: window resize, or a grid change that
+// reshapes every cell at once.
+const cellResizeObserver = new ResizeObserver((entries) => {
+  for (const entry of entries) applyCoverFit(entry.target);
+});
+
+function applyCoverFit(cell) {
+  const iframe = cell?.querySelector("iframe");
+  if (!iframe) return;
+  const { width, height } = cell.getBoundingClientRect();
+  if (!width || !height) return;
+  const rect = coverRect(width, height);
+  iframe.style.width = `${rect.width}px`;
+  iframe.style.height = `${rect.height}px`;
+  iframe.style.left = `${rect.left}px`;
+  iframe.style.top = `${rect.top}px`;
+}
 
 // The IFrame API signals readiness by calling this global exactly once, when
 // www-widgetapi.js finishes loading. That is a race we lose more often than
@@ -59,6 +80,7 @@ function destroyPlayers() {
 }
 
 function buildCells() {
+  cellResizeObserver.disconnect();
   gridEl.replaceChildren();
   gridEl.style.gridTemplateColumns = `repeat(${config.grid.cols}, 1fr)`;
   gridEl.style.gridTemplateRows = `repeat(${config.grid.rows}, 1fr)`;
@@ -71,6 +93,7 @@ function buildCells() {
     mount.id = `slot-${index}`;
     cell.appendChild(mount);
     gridEl.appendChild(cell);
+    cellResizeObserver.observe(cell);
     return { cell, mount, videoId };
   });
 }
@@ -91,7 +114,14 @@ function makePlayer({ mount, videoId }, index) {
     events: {
       onReady: (event) => {
         event.target.mute();
-        if (hasPlayed && config.playback.autoplay_on_change) event.target.playVideo();
+        // The iframe only exists once the player is ready, so this is the
+        // earliest point the crop can be applied. Ask the player for its own
+        // iframe: `mount` was replaced by it and is detached by now.
+        applyCoverFit(event.target.getIframe()?.closest(".cell"));
+        // Do not resurrect playback the user deliberately paused.
+        if (hasPlayed && !paused && config.playback.autoplay_on_change) {
+          event.target.playVideo();
+        }
       },
       onError: () => handlePlayerError(index),
       onStateChange: (event) => {
@@ -122,6 +152,7 @@ function handlePlayerError(index) {
   const mount = document.createElement("div");
   mount.id = `slot-${index}`;
   cell.appendChild(mount);
+  cellResizeObserver.observe(cell);
   players[index] = makePlayer({ mount, videoId }, index);
 
   if (!next.replaced) {
@@ -179,9 +210,15 @@ async function resync() {
 
 playButton.addEventListener("click", () => {
   hasPlayed = true;
+  paused = false;
   // Eight muted players starting at once is exactly what browsers throttle.
   // This click is the user gesture that makes them all start.
   for (const player of players) player?.playVideo?.();
+});
+
+pauseButton.addEventListener("click", () => {
+  paused = true;
+  for (const player of players) player?.pauseVideo?.();
 });
 
 connectSocket({

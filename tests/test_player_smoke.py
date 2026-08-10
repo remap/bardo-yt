@@ -182,3 +182,77 @@ def test_one_play_click_reaches_every_player(running_server):
         page.wait_for_function("window.__playCalls >= 8", timeout=15_000)
         assert page.locator('.cell[data-empty="true"]').count() == 0
         browser.close()
+
+
+def test_pause_stops_every_player(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "window.__players?.every(p => typeof p?.pauseVideo === 'function')", timeout=25_000
+        )
+
+        page.evaluate("""
+            window.__pauseCalls = 0;
+            for (const player of window.__players) {
+                const original = player.pauseVideo.bind(player);
+                player.pauseVideo = () => { window.__pauseCalls += 1; return original(); };
+            }
+        """)
+        page.click("#play")
+        page.click("#pause")
+        page.wait_for_function("window.__pauseCalls >= 8", timeout=15_000)
+        browser.close()
+
+
+def test_every_iframe_covers_its_cell_with_no_letterboxing(running_server):
+    """The iframe must fill the cell in both axes, cropped and centred.
+
+    A YouTube iframe is internally 16:9 and letterboxes itself in any other
+    shape, so this only holds if the iframe is deliberately oversized past the
+    cell bounds and clipped by overflow:hidden.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(
+            ignore_https_errors=True, viewport={"width": 1400, "height": 700}
+        ).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+        # Cells are 4x2 across a 1400x700 viewport, so they are nowhere near
+        # 16:9 -- exactly the case that letterboxes without a cover fit.
+        page.wait_for_function(
+            """[...document.querySelectorAll('.cell')].every(cell => {
+                 const f = cell.querySelector('iframe');
+                 if (!f) return false;
+                 const c = cell.getBoundingClientRect();
+                 const r = f.getBoundingClientRect();
+                 return r.width >= c.width - 1 && r.height >= c.height - 1;
+               })""",
+            timeout=20_000,
+        )
+
+        measurements = page.evaluate("""
+            [...document.querySelectorAll('.cell')].map(cell => {
+                const c = cell.getBoundingClientRect();
+                const r = cell.querySelector('iframe').getBoundingClientRect();
+                return {
+                    coversWidth:  r.width  >= c.width  - 1,
+                    coversHeight: r.height >= c.height - 1,
+                    aspect: r.width / r.height,
+                    centredX: Math.abs((r.left + r.right) / 2 - (c.left + c.right) / 2),
+                    centredY: Math.abs((r.top + r.bottom) / 2 - (c.top + c.bottom) / 2),
+                };
+            })
+        """)
+        assert len(measurements) == 8
+        for i, m in enumerate(measurements):
+            assert m["coversWidth"], f"cell {i} letterboxes horizontally"
+            assert m["coversHeight"], f"cell {i} letterboxes vertically"
+            assert abs(m["aspect"] - 16 / 9) < 0.02, f"cell {i} distorts: {m['aspect']}"
+            assert m["centredX"] < 1.5, f"cell {i} crop off-centre by {m['centredX']}px"
+            assert m["centredY"] < 1.5, f"cell {i} crop off-centre by {m['centredY']}px"
+        browser.close()

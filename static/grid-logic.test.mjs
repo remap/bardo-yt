@@ -5,7 +5,54 @@ import {
   substituteFailedSlot,
   classifyConfigChange,
   cellCount,
+  coverRect,
 } from "./grid-logic.js";
+
+// Cover-fit: fill the cell in both axes and crop the overflow, centered.
+// A YouTube iframe is always 16:9 internally, so any cell that is not 16:9
+// letterboxes unless the iframe is deliberately oversized and clipped.
+
+test("coverRect fills exactly when the cell is already 16:9", () => {
+  const r = coverRect(1600, 900);
+  assert.deepEqual(r, { width: 1600, height: 900, left: 0, top: 0 });
+});
+
+test("coverRect overflows vertically for a cell wider than 16:9", () => {
+  // 1600x400 is wider than 16:9, so width binds and height spills over.
+  const r = coverRect(1600, 400);
+  assert.equal(r.width, 1600);
+  assert.equal(r.height, 900);
+  assert.equal(r.left, 0);
+  assert.equal(r.top, -250); // (400 - 900) / 2 -- centered crop
+});
+
+test("coverRect overflows horizontally for a cell taller than 16:9", () => {
+  const r = coverRect(900, 900);
+  assert.equal(r.height, 900);
+  assert.equal(r.width, 1600);
+  assert.equal(r.top, 0);
+  assert.equal(r.left, -350); // (900 - 1600) / 2
+});
+
+test("coverRect never leaves a gap in either axis", () => {
+  for (const [w, h] of [[400, 200], [200, 400], [1920, 1080], [333, 777], [1000, 1]]) {
+    const r = coverRect(w, h);
+    assert.ok(r.width >= w - 0.001, `width ${r.width} < cell ${w}`);
+    assert.ok(r.height >= h - 0.001, `height ${r.height} < cell ${h}`);
+  }
+});
+
+test("coverRect centers the overflow evenly", () => {
+  const r = coverRect(600, 200);
+  assert.equal(r.left * 2 + r.width, 600 + (r.width - 600) - (r.width - 600));
+  // Overflow above equals overflow below.
+  assert.equal(r.top, (200 - r.height) / 2);
+});
+
+test("coverRect handles a zero-sized cell without producing NaN", () => {
+  const r = coverRect(0, 0);
+  for (const v of Object.values(r)) assert.ok(Number.isFinite(v), `${v} is not finite`);
+});
 
 // `cells` is a Python @property on the Grid model, so it is absent from the
 // serialized config. Reading config.grid.cells returned undefined, splitSlots

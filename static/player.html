@@ -25,8 +25,10 @@
   #status[data-state="error"] { color: #e0685f; }
   a { color: #8a8a94; margin-left: auto; }
   #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
+  /* overflow:hidden is what performs the crop -- player.js oversizes the
+     iframe past the cell bounds and this clips it. */
   .cell { position: relative; background: #000; overflow: hidden; }
-  .cell iframe { width: 100%; height: 100%; border: 0; display: block; }
+  .cell iframe { position: absolute; border: 0; display: block; }
   .cell[data-empty="true"]::after {
     content: "no playable result";
     position: absolute; inset: 0; display: grid; place-items: center;
@@ -37,6 +39,7 @@
 <body>
   <header>
     <button id="play">Play all</button>
+    <button id="pause">Pause all</button>
     <span id="status">loading…</span>
     <a href="/config">config →</a>
   </header>
