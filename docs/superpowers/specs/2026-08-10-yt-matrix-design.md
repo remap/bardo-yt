@@ -175,6 +175,9 @@ visible interruption beyond one cell reloading.
 
 With 42 spares behind 8 slots, exhaustion is unlikely; if it happens, the
 cell renders a plain "no playable result" state rather than failing silently.
+Note the reserve shrinks as the grid grows — a 50-cell grid has none, and
+degrades straight to that empty state. At the 8-cell default this is not a
+concern.
 
 ## 5. The two pages
 
@@ -195,6 +198,9 @@ gets most of the way visually, but expect a title overlay and end-screen
 suggestions. This is the ceiling of the embed approach, and it is the
 specific thing that would push a future wall version toward downloaded
 files instead.
+
+**Initial state.** On load the players are constructed but not started, each
+showing its video's poster frame. Nothing plays until Play is pressed.
 
 **The Play button is a mechanism, not just UX.** Muted autoplay is permitted
 by browser policy, but eight players starting simultaneously is exactly the
@@ -229,7 +235,10 @@ The player reacts by scope:
 | Changed | Response |
 |---|---|
 | `grid`, or the video set | tear down and rebuild the players |
-| `muted`, `start_offset`, `loop` | apply in place via `mute()` / `seekTo()` |
+| `start_offset`, `loop`, `autoplay_on_change` | apply in place via `seekTo()` / handler state |
+
+`muted` is not in either row: v1 validation forces it true (§6), so it
+cannot change. The in-place path is built for the fields that can.
 
 Everything updates live, but cosmetic edits do not restart eight videos.
 
@@ -253,7 +262,7 @@ search:
   relevance_language: en    # optional; omit for none
 
 playback:
-  muted: true               # forced true in v1; present so it can be relaxed
+  muted: true               # v1 validation rejects false; present so it can be relaxed later
   autoplay_on_change: true  # applies after the first Play press
   start_offset: 0           # seconds into each video
   loop: true                # restart a video on ended
@@ -280,7 +289,7 @@ three cannot drift.
 |---|---|
 | Missing `YOUTUBE_API_KEY` | fail at startup with an explicit message |
 | 403 `quotaExceeded` | report as such to both pages; fall back to stale cache if present — expired-but-present beats blank |
-| Transport error, 5xx | bounded retry with backoff |
+| Transport error, 5xx | 3 attempts total, exponential backoff (1s, 2s), then surface the failure and keep the previous set on screen |
 | Zero results | not an error; show "no results for that query" and keep the previous set on screen |
 | Embed failure | substitute from the reserve pool (§4.3) |
 
