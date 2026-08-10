@@ -1,4 +1,9 @@
-import { splitSlots, substituteFailedSlot, classifyConfigChange } from "./grid-logic.js";
+import {
+  splitSlots,
+  substituteFailedSlot,
+  classifyConfigChange,
+  cellCount,
+} from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
 const gridEl = document.getElementById("grid");
@@ -11,11 +16,31 @@ let players = [];
 let apiReady = false;
 let hasPlayed = false;
 
-// The IFrame API signals readiness through this global.
-window.onYouTubeIframeAPIReady = () => {
+// The IFrame API signals readiness by calling this global exactly once, when
+// www-widgetapi.js finishes loading. That is a race we lose more often than
+// not: player.js is a module, so it is deferred until after the document
+// parses, while the API script is injected during parsing and often finishes
+// first -- especially when cached. When it wins, it finds no callback
+// registered, never calls one, and the page sits blank with no error at all.
+//
+// So check for an already-loaded API first, and only register the callback if
+// it genuinely has not arrived yet.
+function whenYouTubeApiReady(callback) {
+  if (window.YT?.Player) {
+    callback();
+    return;
+  }
+  const previous = window.onYouTubeIframeAPIReady;
+  window.onYouTubeIframeAPIReady = () => {
+    previous?.();
+    callback();
+  };
+}
+
+whenYouTubeApiReady(() => {
   apiReady = true;
   rebuild();
-};
+});
 
 function setStatus(text, state = "") {
   statusEl.textContent = text;
@@ -109,6 +134,8 @@ function rebuild() {
   destroyPlayers();
   const cells = buildCells();
   players = cells.map((cell, index) => makePlayer(cell, index));
+  // Exposed for the browser smoke test to assert against.
+  window.__players = players;
 }
 
 function applyInPlace() {
@@ -119,7 +146,7 @@ function applyInPlace() {
 }
 
 function applyVideos(message) {
-  slotState = splitSlots(message.video_ids.concat(message.reserves), config.grid.cells);
+  slotState = splitSlots(message.video_ids.concat(message.reserves), cellCount(config.grid));
   const notes = {
     quota_exceeded_stale: "quota spent — showing cached results",
     no_results: "no results for that query",

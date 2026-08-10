@@ -1,6 +1,14 @@
 // Pure grid/reserve bookkeeping. No DOM, no YouTube API -- so it can be
 // tested with `node --test` and reasoned about on its own.
 
+// Grid.cells is a Python @property on the pydantic model, which means it is
+// NOT part of model_dump() and never reaches the browser. Deriving it here is
+// the single source of truth on the JS side; reading `config.grid.cells`
+// directly yields undefined and silently builds an empty grid.
+export function cellCount(grid) {
+  return grid.cols * grid.rows;
+}
+
 export function splitSlots(videoIds, cellCount) {
   const slots = [];
   for (let i = 0; i < cellCount; i += 1) {

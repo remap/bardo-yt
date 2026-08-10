@@ -16,11 +16,20 @@ Task-by-task build: `docs/superpowers/plans/2026-08-10-yt-matrix.md`.
 ```bash
 uv sync
 cp .env.example .env        # set YOUTUBE_API_KEY
+
+brew install mkcert nss     # nss is what lets mkcert reach Firefox
+mkcert -install             # one-time: trust the local CA (asks for your password)
+
 ./run.sh                    # https://localhost:8444/
 ```
 
-The certificate is self-signed and generated on first run, so the browser will
-warn once — click through it.
+With `mkcert -install` done, `run.sh` issues a certificate your browser already
+trusts and there is no warning. Skip it and you get a self-signed fallback plus
+the usual click-through — the server tells you which one you got at startup.
+
+**Open `localhost`, not `127.0.0.1`.** YouTube refuses to embed into a page
+served from the IP address: every player fails with error 150. Same server,
+same videos, different hostname.
 
 Two pages:
 
@@ -51,8 +60,14 @@ reserve pool and swapped in when an embed fails at play time.
 ```bash
 uv run pytest tests/ -v          # default suite, no network
 node --test 'static/*.test.mjs'  # pure frontend logic
+uv run pytest -m browser -v      # real Chromium; spends no quota
 uv run pytest -m live -v         # one real search; spends 100 quota units
 ```
+
+The browser suite exists because two bugs made the wall render completely
+blank with no console error, and neither the Python nor the node tests could
+see them — one was script-ordering, the other a Python/JS serialization gap.
+Run it after touching `player.js` or the config wire format.
 
 A conftest guard fails any default-suite test that reaches the live API, so
 the budget cannot be spent by accident.

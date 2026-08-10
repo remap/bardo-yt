@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import uvicorn
 
-from ytmatrix.certs import ensure_self_signed_cert
+from ytmatrix.certs import ensure_cert, mkcert_ca_installed
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
 
@@ -16,13 +17,27 @@ def main() -> None:
     # which is the point: fail at startup, not at the first search.
     settings = Settings()
 
-    cert_path = REPO_ROOT / "runtime" / "cert.pem"
-    key_path = REPO_ROOT / "runtime" / "key.pem"
-    ensure_self_signed_cert(cert_path, key_path)
+    runtime_dir = Path(os.environ.get("YTMATRIX_RUNTIME_DIR", REPO_ROOT / "runtime"))
+    cert_path = runtime_dir / "cert.pem"
+    key_path = runtime_dir / "key.pem"
+    kind = ensure_cert(cert_path, key_path)
+    if kind == "self-signed" or (kind == "existing" and not mkcert_ca_installed()):
+        print(
+            "\n  Certificate is self-signed, so the browser will warn.\n"
+            "  To get a trusted one:  mkcert -install  (then delete "
+            f"{cert_path.parent}/ and restart)\n"
+            "  Firefox additionally needs:  brew install nss\n",
+            flush=True,
+        )
+    print(
+        f"  Open https://localhost:{settings.port}/  "
+        "(use localhost, not 127.0.0.1 -- YouTube refuses to embed into the IP)\n",
+        flush=True,
+    )
 
     app = create_app(
-        config_path=REPO_ROOT / "config.yaml",
-        cache_dir=REPO_ROOT / "cache",
+        config_path=Path(os.environ.get("YTMATRIX_CONFIG_PATH", REPO_ROOT / "config.yaml")),
+        cache_dir=Path(os.environ.get("YTMATRIX_CACHE_DIR", REPO_ROOT / "cache")),
         settings=settings,
     )
     uvicorn.run(

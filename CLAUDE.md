@@ -84,3 +84,32 @@ directory as a module on Node 23 and fails.
     of a custom-validator error holds the original `ValueError` object, which
     is not JSON serializable; without it FastAPI raises a 500 while trying to
     encode the 422. This bit once already.
+
+11. **Use `localhost`, never `127.0.0.1`.** YouTube refuses to embed into a
+    page served from the IP — every player fails with `onError` 150
+    ("embedding disallowed") — while accepting the identical page at
+    `localhost`. This costs hours if you don't know it: the failure looks
+    exactly like genuinely non-embeddable videos, and the reserve pool
+    dutifully burns through all 42 spares trying to recover. The browser smoke
+    test's fixture URL and `CERT_HOSTS` both depend on this.
+
+12. **`onYouTubeIframeAPIReady` is a race the module usually loses.**
+    `player.js` is an ES module, so it is deferred until after the document
+    parses, while `iframe_api` is injected during parsing and often finishes
+    first — especially warm. When it wins, it finds no callback registered and
+    never calls one; `apiReady` stays false and the wall renders blank with no
+    console error whatsoever. `whenYouTubeApiReady()` checks for an
+    already-loaded `YT.Player` before registering. Do not "simplify" it back
+    to a bare assignment.
+
+13. **`Grid.cells` is a Python `@property`, so it is NOT in the JSON.**
+    `model_dump()` emits only `cols` and `rows`. Reading `config.grid.cells`
+    in JS yields `undefined`, `splitSlots` builds zero slots, and the wall goes
+    blank — again with no error. JS derives the count via `cellCount(grid)` in
+    `grid-logic.js`. Same class of bug as #12 and it hid behind it.
+
+14. **Browser bugs need a browser test.** #12 and #13 were both invisible to
+    the Python suite and the node tests — one is script-ordering, the other a
+    serialization gap between two languages. `tests/test_player_smoke.py`
+    (marked `browser`) is the only thing that catches either. Run it after any
+    change to `player.js` or the config wire format.

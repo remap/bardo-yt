@@ -1,6 +1,32 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { splitSlots, substituteFailedSlot, classifyConfigChange } from "./grid-logic.js";
+import {
+  splitSlots,
+  substituteFailedSlot,
+  classifyConfigChange,
+  cellCount,
+} from "./grid-logic.js";
+
+// `cells` is a Python @property on the Grid model, so it is absent from the
+// serialized config. Reading config.grid.cells returned undefined, splitSlots
+// built zero slots, and the wall rendered blank with no error.
+test("cellCount derives the total from cols and rows", () => {
+  assert.equal(cellCount({ cols: 4, rows: 2 }), 8);
+  assert.equal(cellCount({ cols: 3, rows: 1 }), 3);
+});
+
+test("cellCount does not depend on a `cells` key being serialized", () => {
+  const grid = { cols: 2, rows: 2 };
+  assert.equal("cells" in grid, false);
+  assert.equal(cellCount(grid), 4);
+});
+
+test("splitSlots with an undefined count builds nothing -- the blank-wall bug", () => {
+  // Guards the contract cellCount exists to satisfy: passing undefined here
+  // silently produces an empty grid rather than throwing.
+  const { slots } = splitSlots(["a", "b"], undefined);
+  assert.deepEqual(slots, []);
+});
 
 const ids = (n, prefix = "v") =>
   Array.from({ length: n }, (_, i) => `${prefix}${String(i).padStart(3, "0")}`);
