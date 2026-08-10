@@ -53,19 +53,14 @@ class SearchConfig(Strict):
 
 
 class PlaybackConfig(Strict):
+    # The state the wall STARTS in, not a permanent one: the page has a
+    # mute/unmute-all button that overrides this at runtime. Defaults to muted
+    # because browsers only permit autoplay when muted -- start unmuted and an
+    # arbitrary subset of players silently refuses to begin.
     muted: bool = True
     autoplay_on_change: bool = True
     start_offset: int = Field(default=0, ge=0)
     loop: bool = True
-
-    @field_validator("muted")
-    @classmethod
-    def _forced_muted(cls, value: bool) -> bool:
-        # Unmuting is deliberately deferred: it needs the OS loopback audio path
-        # (spec section 1, non-goals). The field exists so it can be relaxed later.
-        if not value:
-            raise ValueError("playback.muted must be true in this version")
-        return value
 
 
 class CacheConfig(Strict):

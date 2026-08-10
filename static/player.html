@@ -28,7 +28,12 @@
   /* overflow:hidden is what performs the crop -- player.js oversizes the
      iframe past the cell bounds and this clips it. */
   .cell { position: relative; background: #000; overflow: hidden; }
-  .cell iframe { position: absolute; border: 0; display: block; }
+  /* pointer-events:none is doing real work, not just tidying: YouTube reveals
+     the title bar, channel avatar and control overlay on mouse-over, and there
+     is no player parameter that suppresses them. If the cursor can never reach
+     the iframe, they are never summoned. Everything here is driven through the
+     JS API, so nothing needs to click the player. */
+  .cell iframe { position: absolute; border: 0; display: block; pointer-events: none; }
   .cell[data-empty="true"]::after {
     content: "no playable result";
     position: absolute; inset: 0; display: grid; place-items: center;
@@ -40,6 +45,7 @@
   <header>
     <button id="play">Play all</button>
     <button id="pause">Pause all</button>
+    <button id="mute">Unmute all</button>
     <span id="status">loading…</span>
     <a href="/config">config →</a>
   </header>

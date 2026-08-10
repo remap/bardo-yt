@@ -68,10 +68,17 @@ def test_strips_surrounding_whitespace_from_the_query():
     assert Config.model_validate({**VALID, "query": "  hello  "}).query == "hello"
 
 
-def test_rejects_unmuted_playback_in_this_version():
+def test_starting_unmuted_is_now_a_valid_configuration():
+    # muted is the STARTING state, not a permanent one -- the wall has a
+    # mute/unmute-all button. It defaults to true only because browsers refuse
+    # to autoplay audible video.
     data = {**VALID, "playback": {**VALID["playback"], "muted": False}}
-    with pytest.raises(ValidationError, match="must be true"):
-        Config.model_validate(data)
+    assert Config.model_validate(data).playback.muted is False
+
+
+def test_playback_starts_muted_by_default():
+    playback = {k: v for k, v in VALID["playback"].items() if k != "muted"}
+    assert Config.model_validate({**VALID, "playback": playback}).playback.muted is True
 
 
 def test_rejects_a_nonpositive_cache_ttl():

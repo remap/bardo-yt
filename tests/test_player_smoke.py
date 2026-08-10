@@ -206,6 +206,62 @@ def test_pause_stops_every_player(running_server):
         browser.close()
 
 
+def test_the_wall_starts_muted_and_the_button_unmutes_every_player(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "window.__players?.every(p => typeof p?.isMuted === 'function')", timeout=25_000
+        )
+
+        assert page.locator("#mute").text_content().strip() == "Unmute all"
+        assert page.evaluate("window.__players.every(p => p.isMuted())"), "should start muted"
+
+        page.click("#play")
+        page.click("#mute")
+        page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=15_000)
+        assert page.locator("#mute").text_content().strip() == "Mute all"
+
+        page.click("#mute")
+        page.wait_for_function("window.__players.every(p => p.isMuted())", timeout=15_000)
+        assert page.locator("#mute").text_content().strip() == "Unmute all"
+        browser.close()
+
+
+def test_player_chrome_is_suppressed_as_far_as_the_api_allows(running_server):
+    """Assert the parameters that still work, and the hover block.
+
+    modestbranding and showinfo are deprecated and ignored by YouTube, so
+    asserting them would test nothing. iv_load_policy, cc_load_policy,
+    controls, disablekb and fs are still honoured.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        sources = page.eval_on_selector_all(".cell iframe", "els => els.map(e => e.src)")
+        assert len(sources) == 8
+        for src in sources:
+            assert "controls=0" in src, src
+            assert "iv_load_policy=3" in src, src
+            assert "cc_load_policy=0" in src, src
+            assert "disablekb=1" in src, src
+            assert "rel=0" in src, src
+
+        # The title bar and channel avatar appear on mouse-over and no player
+        # parameter suppresses them. Blocking pointer events is what does.
+        assert page.eval_on_selector_all(
+            ".cell iframe",
+            "els => els.every(e => getComputedStyle(e).pointerEvents === 'none')",
+        )
+        browser.close()
+
+
 def test_every_iframe_covers_its_cell_with_no_letterboxing(running_server):
     """The iframe must fill the cell in both axes, cropped and centred.
 

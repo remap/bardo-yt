@@ -11,6 +11,7 @@ const gridEl = document.getElementById("grid");
 const statusEl = document.getElementById("status");
 const playButton = document.getElementById("play");
 const pauseButton = document.getElementById("pause");
+const muteButton = document.getElementById("mute");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
@@ -18,6 +19,43 @@ let players = [];
 let apiReady = false;
 let hasPlayed = false;
 let paused = false;
+// Runtime mute state, seeded from config on first load and thereafter owned by
+// the button. Kept separate from config.playback.muted so a config push does
+// not silently undo what the user just clicked.
+let muted = true;
+
+function applyMuteState(player) {
+  if (!player?.mute) return;
+  if (muted) player.mute();
+  else player.unMute();
+}
+
+function refreshMuteButton() {
+  muteButton.textContent = muted ? "Unmute all" : "Mute all";
+  muteButton.dataset.muted = String(muted);
+}
+
+// cc_load_policy=0 only means "do not turn captions on for me"; a video whose
+// own default is captions-on still shows them, and the captions module is not
+// even loaded until playback begins. So this runs again on PLAYING, not only
+// on ready. Both module names are tried because the API has used each.
+//
+// This cannot touch text burned into the video's own pixels -- creator-added
+// subtitles are part of the picture and no API reaches them.
+function suppressCaptions(player) {
+  for (const module of ["captions", "cc"]) {
+    try {
+      player.unloadModule(module);
+    } catch {
+      // Not every player exposes both; whichever exists is enough.
+    }
+  }
+  try {
+    player.setOption("captions", "track", {});
+  } catch {
+    // Only valid once the module has loaded; harmless when it has not.
+  }
+}
 
 // Re-crop whenever a cell changes size: window resize, or a grid change that
 // reshapes every cell at once.
@@ -103,17 +141,28 @@ function makePlayer({ mount, videoId }, index) {
   return new YT.Player(mount, {
     videoId,
     playerVars: {
+      // Always start muted regardless of config: browsers only autoplay muted
+      // video. The configured/desired state is applied on ready, below.
       mute: 1,
       controls: 0,
-      // Neither rel=0 nor modestbranding removes YouTube's chrome any more --
-      // see spec section 5.1. These are the best available, not a clean frame.
+      // Related videos cannot be removed, only restricted to the same channel.
       rel: 0,
       playsinline: 1,
+      // Annotations and cards off. Unlike modestbranding and showinfo -- both
+      // deprecated and silently ignored -- this one still does something.
+      iv_load_policy: 3,
+      // Do not turn captions on by default. Burned-in captions on a wall of
+      // eight videos is noise, and it is the one piece of overlay text a
+      // player parameter can actually reach.
+      cc_load_policy: 0,
+      disablekb: 1,
+      fs: 0,
       start: config.playback.start_offset,
     },
     events: {
       onReady: (event) => {
-        event.target.mute();
+        applyMuteState(event.target);
+        suppressCaptions(event.target);
         // The iframe only exists once the player is ready, so this is the
         // earliest point the crop can be applied. Ask the player for its own
         // iframe: `mount` was replaced by it and is detached by now.
@@ -125,6 +174,9 @@ function makePlayer({ mount, videoId }, index) {
       },
       onError: () => handlePlayerError(index),
       onStateChange: (event) => {
+        // The captions module only exists once playback has begun, so the
+        // onReady attempt above is often too early to have had any effect.
+        if (event.data === YT.PlayerState.PLAYING) suppressCaptions(event.target);
         if (event.data === YT.PlayerState.ENDED && config.playback.loop) {
           event.target.seekTo(config.playback.start_offset);
           event.target.playVideo();
@@ -200,9 +252,17 @@ function applyVideos(message) {
 // reconnect, and a reconnect is a network hiccup -- spending 100 units each
 // time the wifi blinks would drain the day's budget with nothing to show.
 let generatedThisPageLoad = false;
+let seededMuteFromConfig = false;
 
 async function resync() {
   config = await (await fetch("/api/config")).json();
+
+  // Seed once. On a later reconnect the button, not the file, is the truth.
+  if (!seededMuteFromConfig) {
+    seededMuteFromConfig = true;
+    muted = config.playback.muted;
+    refreshMuteButton();
+  }
 
   if (config.query_generation?.enabled && !generatedThisPageLoad) {
     generatedThisPageLoad = true;
@@ -239,6 +299,16 @@ pauseButton.addEventListener("click", () => {
   paused = true;
   for (const player of players) player?.pauseVideo?.();
 });
+
+muteButton.addEventListener("click", () => {
+  muted = !muted;
+  refreshMuteButton();
+  // Unmuting eight players at once is only permitted off a user gesture --
+  // this click is it. Doing it any other way leaves some players silent.
+  for (const player of players) applyMuteState(player);
+});
+
+refreshMuteButton();
 
 connectSocket({
   onReconnect: resync,

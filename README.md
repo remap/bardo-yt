@@ -33,7 +33,9 @@ same videos, different hostname.
 
 Two pages:
 
-- **`/`** — the wall. One Play button starts every cell.
+- **`/`** — the wall. **Play all** / **Pause all** / **Unmute all** drive every
+  cell at once. It starts muted because browsers only autoplay muted video;
+  the button supplies the user gesture that unmuting requires.
 - **`/config`** — live editor. Saving pushes to the wall over a WebSocket.
 
 ## Authentication
@@ -95,12 +97,16 @@ the budget cannot be spent by accident.
 
 These are inherent to embedding, not bugs:
 
-1. **YouTube chrome cannot be fully removed.** `modestbranding` is deprecated
-   and ignored; `rel=0` no longer removes related videos, it only restricts
-   them to the same channel. Expect a title overlay and end-screen
-   suggestions.
-2. **Ads play.** Muted, but they play, and they interrupt the grid.
+1. **Some chrome is unreachable.** Controls, annotations, captions and the
+   hover title bar are all suppressed (see `CLAUDE.md` for which parameter does
+   what and which are deprecated no-ops). End-screen suggestions on a finished
+   video are not, and text **burned into the video's own pixels** — creator
+   subtitles, tracklists — is part of the picture and cannot be touched.
+2. **Ads play** and interrupt the grid.
 3. **Concurrent iframes are heavy** — each is a full nested browsing context.
+4. **Non-16:9 sources still box themselves.** The iframe is cropped to fill its
+   cell, but YouTube pillarboxes a vertically-shot video *inside* its own
+   player, and that is cross-origin.
 
 If the wall version cannot tolerate these, the alternative is locally
 downloaded files played through `<video>`, which trades ToS compliance and

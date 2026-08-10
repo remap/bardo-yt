@@ -105,11 +105,12 @@ def test_put_config_rejects_invalid_input_with_422(app_env):
     assert response.status_code == 422
 
 
-def test_put_config_rejects_unmuted_playback(app_env):
-    app, _, _ = app_env
-    bad = {**VALID, "playback": {**VALID["playback"], "muted": False}}
+def test_put_config_accepts_starting_unmuted(app_env):
+    app, _, cache_dir = app_env
+    seed_cache(cache_dir)
+    unmuted = {**VALID, "playback": {**VALID["playback"], "muted": False}}
     with TestClient(app) as client:
-        assert client.put("/api/config", json=bad).status_code == 422
+        assert client.put("/api/config", json=unmuted).status_code == 200
 
 
 def test_a_rejected_put_leaves_the_file_untouched(app_env):

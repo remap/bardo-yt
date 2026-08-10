@@ -72,18 +72,43 @@ directory as a module on Node 23 and fails.
    101/150/100/2/5. The reserve pool exists for this. Do not remove it after a
    run where nothing happened to fail.
 
-5. **`playback.muted` is validated as `true`.** Unmuting needs the OS loopback
-   audio path (see layout-driver's audio design) and is deliberately deferred.
+5. **`playback.muted` is the STARTING state, not a permanent one.** The wall
+   has a mute/unmute-all button and runtime mute is owned by that button, not
+   by the config file — a config push must not silently undo a click. It
+   defaults to `true` because browsers only autoplay muted video: start
+   unmuted and an arbitrary subset of players never begins. Unmuting is only
+   permitted off a user gesture, which is what the button supplies.
 
 6. **The Play button is a mechanism, not decoration.** Browsers throttle many
    simultaneous autoplaying players; the click is the user gesture that lets
    them all start. Removing it in favor of pure autoplay will produce a grid
    where an arbitrary subset of cells silently never starts.
 
-7. **YouTube chrome cannot be fully suppressed.** `modestbranding` is
-   deprecated; `rel=0` only restricts related videos to the same channel. Do
-   not spend time trying to hide the title bar with player parameters — the
-   ceiling here is a property of embedding.
+7. **Know which chrome suppressions actually work.** Do not spend time on the
+   dead ones or re-add them:
+
+   | Parameter | Status |
+   |---|---|
+   | `modestbranding` | deprecated, silently ignored |
+   | `showinfo` | removed in 2018, ignored |
+   | `rel=0` | works, but only restricts related videos to the same channel |
+   | `controls=0`, `disablekb=1`, `fs=0` | work |
+   | `iv_load_policy=3` | works — annotations and cards off |
+   | `cc_load_policy=0` | works, but only means "do not turn captions on for me" |
+
+   Two things no parameter can do, handled in `player.js` instead:
+
+   - **The title bar and channel avatar appear on hover.** `pointer-events:
+     none` on the iframe is what prevents them — the cursor can never reach the
+     player. Everything is driven through the JS API, so nothing needs to click
+     it. Removing that CSS brings the overlay back.
+   - **Captions.** A video whose own default is captions-on ignores
+     `cc_load_policy`, and the captions module does not exist until playback
+     starts — so `suppressCaptions()` runs on **PLAYING as well as ready**.
+     Calling it only in `onReady` is too early and does nothing.
+
+   Text burned into the video's own pixels (creator-added subtitles, tracklists)
+   is part of the picture. Nothing reaches it. Do not try.
 
 8. **A rejected `PUT /api/config` must leave `config.yaml` untouched.**
    Validation happens before the write, and there is a test for it.
