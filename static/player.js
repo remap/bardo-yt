@@ -8,6 +8,9 @@ import {
   prerollComplete,
   videoUrl,
   formatTimecode,
+  rectFor,
+  zoomAt,
+  IDENTITY_VIEW,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
@@ -143,12 +146,20 @@ async function loadContentBox(videoId, cell) {
   }
 }
 
+// Per-cell zoom/pan, keyed by cell index. Cleared on rebuild -- a new video
+// in that slot starts fresh rather than inheriting someone else's framing.
+const views = new Map();
+
+function viewFor(cell) {
+  return views.get([...gridEl.children].indexOf(cell)) ?? IDENTITY_VIEW;
+}
+
 function applyCoverFit(cell) {
   const iframe = cell?.querySelector("iframe");
   if (!iframe) return;
   const { width, height } = cell.getBoundingClientRect();
   if (!width || !height) return;
-  const rect = coverRect(width, height, contentBoxes.get(cell.dataset.videoId));
+  const rect = rectFor(width, height, contentBoxes.get(cell.dataset.videoId), viewFor(cell));
   iframe.style.width = `${rect.width}px`;
   iframe.style.height = `${rect.height}px`;
   iframe.style.left = `${rect.left}px`;
@@ -318,6 +329,7 @@ function rebuild() {
   // Every index the open menu is holding is about to become meaningless.
   closeMenu();
   audibleIndex = null;
+  views.clear();
   // Hide before the new cells exist, not after: the flag must already be set
   // by the time anything can paint.
   gridEl.dataset.preroll = "true";
@@ -692,6 +704,15 @@ function menuItems(cell) {
       run: () => player?.seekTo?.(config.playback.start_offset, true),
     },
     {
+      label: "Reset zoom",
+      hint: `${(viewFor(cell).zoom ?? 1).toFixed(2)}×`,
+      run: () => {
+        views.delete(index);
+        cell.dataset.zoomed = "false";
+        applyCoverFit(cell);
+      },
+    },
+    {
       label: "Replace with next reserve",
       hint: `${slotState.reserves.length} left`,
       run: () => handlePlayerError(index),
@@ -780,6 +801,34 @@ hoverUnmuteCheckbox.addEventListener("change", () => {
   setAudibleCell(null);
   applyMuteStateToAll();
 });
+
+// Scroll to zoom, anchored on the pointer. passive:false because the page
+// must not scroll underneath -- the wall is a fixed-height layout and a
+// bubbling wheel event would fight the zoom.
+gridEl.addEventListener(
+  "wheel",
+  (event) => {
+    const cell = event.target.closest(".cell");
+    if (!cell || cell.dataset.empty === "true") return;
+    event.preventDefault();
+
+    const index = [...gridEl.children].indexOf(cell);
+    const bounds = cell.getBoundingClientRect();
+    const view = zoomAt(
+      views.get(index) ?? IDENTITY_VIEW,
+      bounds.width,
+      bounds.height,
+      contentBoxes.get(cell.dataset.videoId),
+      event.deltaY,
+      event.clientX - bounds.left,
+      event.clientY - bounds.top,
+    );
+    views.set(index, view);
+    applyCoverFit(cell);
+    cell.dataset.zoomed = view.zoom > 1.001 ? "true" : "false";
+  },
+  { passive: false },
+);
 
 gridEl.addEventListener("pointerover", (event) => {
   if (!hoverUnmuteCheckbox.checked) return;

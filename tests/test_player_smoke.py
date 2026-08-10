@@ -607,3 +607,138 @@ def test_turning_hover_unmute_off_restores_the_global_state(running_server):
         page.uncheck("#hover-unmute")
         page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=10_000)
         browser.close()
+
+
+def test_scroll_wheel_zooms_toward_the_pointer(running_server):
+    """The pixel under the cursor must stay under it while zooming."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        cell = page.locator(".cell").first
+        box = cell.bounding_box()
+        # A point well off centre, so anchoring is actually exercised.
+        px = box["x"] + box["width"] * 0.2
+        py = box["y"] + box["height"] * 0.75
+
+        def anchored_pixel():
+            return page.evaluate(
+                """([px, py]) => {
+                    const cell = document.querySelector('.cell');
+                    const b = cell.getBoundingClientRect();
+                    const f = cell.querySelector('iframe').getBoundingClientRect();
+                    return [(px - f.left) / f.width, (py - f.top) / f.height];
+                }""",
+                [px, py],
+            )
+
+        before = anchored_pixel()
+        page.mouse.move(px, py)
+        for _ in range(8):
+            page.mouse.wheel(0, -120)
+        page.wait_for_timeout(400)
+
+        after = anchored_pixel()
+        assert abs(after[0] - before[0]) < 0.02, f"drifted horizontally: {before} -> {after}"
+        assert abs(after[1] - before[1]) < 0.02, f"drifted vertically: {before} -> {after}"
+
+        # And it really zoomed.
+        sizes = page.evaluate(
+            """() => {
+                const cell = document.querySelector('.cell');
+                const b = cell.getBoundingClientRect();
+                const f = cell.querySelector('iframe').getBoundingClientRect();
+                return [f.width / b.width, b.width, f.width];
+            }"""
+        )
+        assert sizes[0] > 1.5, f"expected real magnification, got {sizes}"
+        browser.close()
+
+
+def test_zooming_out_pulls_back_to_the_whole_frame(running_server):
+    """Zooming out past cover is intended -- it shows the video entire."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        box = page.locator(".cell").first.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+        def measure():
+            return page.evaluate(
+                """() => {
+                    const cell = document.querySelector('.cell');
+                    const b = cell.getBoundingClientRect();
+                    const f = cell.querySelector('iframe').getBoundingClientRect();
+                    return {
+                        ratio: f.width / b.width,
+                        inside: f.left >= b.left - 1 && f.right <= b.right + 1
+                             && f.top >= b.top - 1 && f.bottom <= b.bottom + 1,
+                        centredX: Math.abs((f.left + f.right) / 2 - (b.left + b.right) / 2),
+                    };
+                }"""
+            )
+
+        before_ratio = measure()["ratio"]
+        assert before_ratio >= 1.0, "should start at cover"
+        assert not measure()["inside"], "at cover the frame must overflow the cell"
+
+        for _ in range(25):
+            page.mouse.wheel(0, 120)
+        page.wait_for_timeout(400)
+
+        out = measure()
+        # "Fit", not "smaller than the cell": at the floor the frame touches
+        # the cell on its binding axis, so the ratio lands at 1.0 rather than
+        # below it. What matters is that the WHOLE frame is now visible, which
+        # it was not at cover.
+        assert out["inside"], f"whole frame should fit in the cell: {out}"
+        assert out["ratio"] < before_ratio, f"did not pull back at all: {out}"
+        assert out["centredX"] < 1.5, f"pulled-back picture drifted off centre: {out}"
+
+        # And back in: it must cover again, no gap left behind.
+        for _ in range(40):
+            page.mouse.wheel(0, -120)
+        page.wait_for_timeout(400)
+        assert measure()["ratio"] > 1
+        browser.close()
+
+
+def test_reset_zoom_is_offered_and_works(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        box = page.locator(".cell").first.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        for _ in range(6):
+            page.mouse.wheel(0, -120)
+        page.wait_for_timeout(300)
+        assert page.locator('.cell[data-zoomed="true"]').count() == 1
+
+        zoomed_width = page.evaluate(
+            "document.querySelector('.cell iframe').getBoundingClientRect().width"
+        )
+        page.locator(".cell").first.click(button="right")
+        page.wait_for_selector("#menu:not([hidden])", timeout=5_000)
+        page.locator("#menu button", has_text="Reset zoom").first.click()
+        page.wait_for_timeout(400)
+
+        reset_width = page.evaluate(
+            "document.querySelector('.cell iframe').getBoundingClientRect().width"
+        )
+        assert reset_width < zoomed_width, f"{zoomed_width} -> {reset_width}"
+        assert page.locator('.cell[data-zoomed="true"]').count() == 0
+        browser.close()

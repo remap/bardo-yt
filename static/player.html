@@ -36,6 +36,11 @@
   }
   /* The cell the cursor is over while hover-unmute is on. */
   .cell[data-audible="true"] { outline: 2px solid #d8a657; outline-offset: -2px; }
+  /* Scroll-wheel zoom is per cell and easy to forget you left on. */
+  .cell[data-zoomed="true"]::before {
+    content: "⌕"; position: absolute; z-index: 2; right: 5px; bottom: 3px;
+    color: #d8a657; font-size: 15px; text-shadow: 0 0 4px #000;
+  }
   #prompt {
     font: inherit; padding: 7px 11px; border-radius: 6px; min-width: 230px;
     border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;

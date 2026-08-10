@@ -114,6 +114,20 @@ right-click. The menu offers:
 - Open on YouTube at time
 - Play, pause, mute, unmute or restart **that one cell**
 - Replace it with the next video from the reserve pool
+- Reset zoom (see below)
+
+## Scroll to zoom
+
+Point at a cell and use the wheel. Zoom is **anchored on the cursor** — the
+pixel under the pointer stays under it — and is per cell, so you can crop into
+one performer while the rest of the wall sits at its normal framing. A zoomed
+cell is marked with a ⌕, and **Reset zoom** in its right-click menu clears it.
+
+Cover is where a cell *starts*, not the limit in either direction. Zooming out
+pulls back until the whole 16:9 frame is visible inside the cell and stops
+there — past that you would only be shrinking the video inside a growing field
+of black. Zooming in is capped at 6×. While the picture is larger than the cell
+the pan is clamped so no gap can open at an edge.
 
 `ytmatrix/budget.py` tracks the day's spend in `cache/_budget.json` and refuses
 to search past the limit, falling back to stale cache when it can rather than
