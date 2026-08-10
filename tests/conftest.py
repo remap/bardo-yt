@@ -12,10 +12,12 @@ def no_live_api(request, monkeypatch):
     midnight Pacific. Tests that need a search stub `youtube.search` themselves;
     that monkeypatch is applied after this one and wins.
     """
-    # test_youtube.py is the one module that exercises search() itself. It is
-    # already safe -- every call goes through an injected MockTransport -- and
-    # patching the function out from under it would defeat its whole purpose.
+    # Two exemptions. test_youtube.py exercises search() itself and is already
+    # safe -- every call goes through an injected MockTransport. Tests marked
+    # `live` are opt-in and reaching the network is the entire point.
     if request.module.__name__.rsplit(".", 1)[-1] == "test_youtube":
+        return
+    if request.node.get_closest_marker("live"):
         return
 
     async def forbidden(*args, **kwargs):

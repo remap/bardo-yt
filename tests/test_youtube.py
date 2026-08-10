@@ -135,9 +135,7 @@ async def test_persistent_5xx_gives_up_after_three_attempts(monkeypatch):
         slept.append(seconds)
 
     monkeypatch.setattr(youtube.asyncio, "sleep", fake_sleep)
-    client, calls = client_returning(
-        httpx.Response(500), httpx.Response(500), httpx.Response(500)
-    )
+    client, calls = client_returning(httpx.Response(500), httpx.Response(500), httpx.Response(500))
     async with client:
         with pytest.raises(youtube.SearchError):
             await youtube.search({"q": "x"}, "KEY", client=client)

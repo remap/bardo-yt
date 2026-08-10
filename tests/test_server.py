@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from ytmatrix import cache, youtube
 from ytmatrix.server import create_app
@@ -206,7 +207,7 @@ def test_quota_exhaustion_with_no_cache_at_all_returns_503(app_env, monkeypatch)
 
 
 def test_a_successful_search_is_written_to_cache(app_env, monkeypatch):
-    app, _, cache_dir = app_env
+    app, _, _unused_cache_dir = app_env
     calls = []
 
     async def fake_search(params, api_key, *, client=None):
@@ -250,5 +251,5 @@ def test_the_config_page_is_served(app_env):
 
 def test_settings_require_an_api_key(monkeypatch):
     monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError, match="youtube_api_key|YOUTUBE_API_KEY"):
         Settings(_env_file=None)
