@@ -73,7 +73,11 @@
   #grid[data-preroll="false"] { opacity: 1; transition: opacity .22s ease-out; }
   /* overflow:hidden is what performs the crop -- player.js oversizes the
      iframe past the cell bounds and this clips it. */
-  .cell { position: relative; background: #000; overflow: hidden; }
+  .cell {
+    position: relative; background: #000; overflow: hidden;
+    cursor: grab; user-select: none;
+  }
+  .cell[data-dragging="true"] { cursor: grabbing; }
   /* pointer-events:none is doing real work, not just tidying: YouTube reveals
      the title bar, channel avatar and control overlay on mouse-over, and there
      is no player parameter that suppresses them. If the cursor can never reach
@@ -92,6 +96,10 @@
     <button id="play">Play all</button>
     <button id="pause">Pause all</button>
     <button id="mute">Unmute all</button>
+    <button id="shuffle" title="New videos from the same query. Costs no quota; a reload restores the ranked order.">
+      Shuffle
+    </button>
+    <button id="reset-view" title="Clear zoom and pan on every cell.">Reset view</button>
     <button id="new-query" title="Invents a new query with Gemini. Costs 100 quota units.">
       New query
     </button>

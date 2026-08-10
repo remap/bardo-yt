@@ -9,6 +9,7 @@ const NUMBER_FIELDS = ["cols", "rows", "start_offset"];
 const CHECK_FIELDS = ["loop", "autoplay_on_change"];
 
 function fill(config) {
+  loaded = config;
   field("query").value = config.query;
   field("order").value = config.search.order;
   field("video_duration").value = config.search.video_duration;
@@ -21,25 +22,31 @@ function fill(config) {
   field("autoplay_on_change").checked = config.playback.autoplay_on_change;
 }
 
+// The last config the server sent. Edits are layered onto THIS rather than a
+// fresh object, so sections this page has no fields for -- query_generation,
+// filtering, quota -- survive a save untouched. Rebuilding the payload from
+// scratch is what silently switched query generation off.
+let loaded = null;
+
 function collect() {
   const language = field("relevance_language").value.trim();
   return {
+    ...(loaded ?? {}),
     query: field("query").value,
     grid: { cols: Number(field("cols").value), rows: Number(field("rows").value) },
     search: {
+      ...(loaded?.search ?? {}),
       order: field("order").value,
       video_duration: field("video_duration").value,
       safe_search: field("safe_search").value,
       relevance_language: language === "" ? null : language,
     },
     playback: {
-      // Forced true in this version; the server rejects false.
-      muted: true,
+      ...(loaded?.playback ?? {}),
       autoplay_on_change: field("autoplay_on_change").checked,
       start_offset: Number(field("start_offset").value),
       loop: field("loop").checked,
     },
-    cache: { ttl_hours: 24 },
   };
 }
 

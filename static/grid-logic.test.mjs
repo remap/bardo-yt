@@ -15,6 +15,8 @@ import {
   ZOOM_MAX,
   ZOOM_STEP,
   minZoom,
+  panBy,
+  shuffleSlots,
   rectFor,
   zoomAt,
   IDENTITY_VIEW,
@@ -515,4 +517,139 @@ test("zooming back in from the floor returns to covering the cell", () => {
   for (let i = 0; i < 40; i += 1) view = zoomAt(view, 400, 400, undefined, -1, 200, 200);
   const r = rectFor(400, 400, undefined, view);
   assert.ok(r.width >= 400 - 0.001 && r.height >= 400 - 0.001, r);
+});
+
+// --- drag to pan -----------------------------------------------------------
+
+test("panBy moves the picture with the drag", () => {
+  const view = panBy(IDENTITY_VIEW, 30, -20);
+  assert.equal(view.offsetX, 30);
+  assert.equal(view.offsetY, -20);
+});
+
+test("panBy accumulates across a drag", () => {
+  let view = IDENTITY_VIEW;
+  for (let i = 0; i < 5; i += 1) view = panBy(view, 10, 5);
+  assert.equal(view.offsetX, 50);
+  assert.equal(view.offsetY, 25);
+});
+
+test("panBy keeps the zoom it was given", () => {
+  assert.equal(panBy({ zoom: 3, offsetX: 0, offsetY: 0 }, 5, 5).zoom, 3);
+});
+
+test("panBy ignores a bogus delta rather than poisoning the view", () => {
+  const view = panBy({ zoom: 2, offsetX: 7, offsetY: 7 }, NaN, undefined);
+  assert.equal(view.offsetX, 7);
+  assert.equal(view.offsetY, 7);
+});
+
+test("panning a zoomed-in cell actually moves what is shown", () => {
+  const zoomed = zoomAt(IDENTITY_VIEW, CELL_W, CELL_H, undefined, -1, 160, 90);
+  const before = rectFor(CELL_W, CELL_H, undefined, zoomed);
+  const after = rectFor(CELL_W, CELL_H, undefined, panBy(zoomed, -15, 0));
+  assert.ok(after.left < before.left, `${before.left} -> ${after.left}`);
+});
+
+test("panning cannot open a gap at an edge", () => {
+  let view = IDENTITY_VIEW;
+  for (let i = 0; i < 6; i += 1) view = zoomAt(view, CELL_W, CELL_H, undefined, -1, 160, 90);
+  for (const [dx, dy] of [[9999, 0], [-9999, 0], [0, 9999], [0, -9999]]) {
+    const r = rectFor(CELL_W, CELL_H, undefined, panBy(view, dx, dy));
+    assert.ok(r.left <= 0.001, `gap left after ${dx},${dy}`);
+    assert.ok(r.top <= 0.001, `gap top after ${dx},${dy}`);
+    assert.ok(r.left + r.width >= CELL_W - 0.001, `gap right after ${dx},${dy}`);
+    assert.ok(r.top + r.height >= CELL_H - 0.001, `gap bottom after ${dx},${dy}`);
+  }
+});
+
+test("a wild drag is not sticky -- panning back returns", () => {
+  // The stored offset is unclamped on purpose: clamping on the way out would
+  // leave an overshooting drag pinned at the edge.
+  let view = IDENTITY_VIEW;
+  for (let i = 0; i < 6; i += 1) view = zoomAt(view, CELL_W, CELL_H, undefined, -1, 160, 90);
+  const home = rectFor(CELL_W, CELL_H, undefined, view);
+  const wandered = panBy(panBy(view, 5000, 0), -5000, 0);
+  assert.ok(Math.abs(rectFor(CELL_W, CELL_H, undefined, wandered).left - home.left) < 0.001);
+});
+
+test("panning an unzoomed cell changes nothing visible", () => {
+  const before = rectFor(CELL_W, CELL_H);
+  const after = rectFor(CELL_W, CELL_H, undefined, panBy(IDENTITY_VIEW, 40, 40));
+  assert.deepEqual(after, before);
+});
+
+// --- reshuffling within the same query -------------------------------------
+
+const pool = (n) => Array.from({ length: n }, (_, i) => `v${String(i).padStart(2, "0")}`);
+
+// A deterministic stand-in for Math.random.
+function seeded(seed) {
+  let state = seed;
+  return () => {
+    state = (state * 1103515245 + 12345) % 2147483648;
+    return state / 2147483648;
+  };
+}
+
+test("shuffleSlots fills every cell", () => {
+  const { slots } = shuffleSlots(pool(50), 8, seeded(1));
+  assert.equal(slots.length, 8);
+  assert.ok(slots.every(Boolean));
+});
+
+test("shuffleSlots never repeats a video across the wall", () => {
+  const { slots } = shuffleSlots(pool(50), 8, seeded(7));
+  assert.equal(new Set(slots).size, 8);
+});
+
+test("shuffleSlots keeps everything else as reserves", () => {
+  const all = pool(50);
+  const { slots, reserves } = shuffleSlots(all, 8, seeded(3));
+  assert.equal(reserves.length, 42);
+  assert.deepEqual([...slots, ...reserves].sort(), [...all].sort());
+});
+
+test("shuffleSlots never puts the same video in two cells", () => {
+  // A pool with repeats: the same video twice on the wall reads as a bug.
+  const repeated = Array.from({ length: 50 }, (_, i) => `v${i % 6}`);
+  const { slots } = shuffleSlots(repeated, 6, seeded(21));
+  assert.equal(new Set(slots.filter(Boolean)).size, slots.filter(Boolean).length);
+});
+
+test("shuffleSlots collapses a pool of repeats to its unique videos", () => {
+  const repeated = Array.from({ length: 50 }, (_, i) => `v${i % 3}`);
+  const { slots, reserves } = shuffleSlots(repeated, 8, seeded(4));
+  assert.equal(slots.filter(Boolean).length, 3);
+  assert.deepEqual(reserves, []);
+});
+
+test("shuffleSlots actually reaches beyond the first eight", () => {
+  // The point of the button: see videos the ranked order never showed.
+  const { slots } = shuffleSlots(pool(50), 8, seeded(11));
+  assert.ok(slots.some((v) => Number(v.slice(1)) >= 8), slots.join(","));
+});
+
+test("different draws give different walls", () => {
+  const a = shuffleSlots(pool(50), 8, seeded(1)).slots.join(",");
+  const b = shuffleSlots(pool(50), 8, seeded(999)).slots.join(",");
+  assert.notEqual(a, b);
+});
+
+test("shuffleSlots drops the empty padding a short pool would carry", () => {
+  const { slots } = shuffleSlots([...pool(3), null, null], 3, seeded(5));
+  assert.equal(slots.length, 3);
+  assert.ok(slots.every(Boolean));
+});
+
+test("shuffleSlots pads when the pool is smaller than the grid", () => {
+  const { slots } = shuffleSlots(pool(3), 8, seeded(5));
+  assert.equal(slots.length, 8);
+  assert.equal(slots.filter(Boolean).length, 3);
+});
+
+test("shuffleSlots handles an empty pool", () => {
+  const { slots, reserves } = shuffleSlots([], 8, seeded(5));
+  assert.deepEqual(reserves, []);
+  assert.equal(slots.filter(Boolean).length, 0);
 });

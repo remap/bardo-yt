@@ -10,6 +10,8 @@ import {
   formatTimecode,
   rectFor,
   zoomAt,
+  panBy,
+  shuffleSlots,
   IDENTITY_VIEW,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
@@ -24,6 +26,8 @@ const followCheckbox = document.getElementById("follow");
 const promptInput = document.getElementById("prompt");
 const hoverUnmuteCheckbox = document.getElementById("hover-unmute");
 const menuEl = document.getElementById("menu");
+const resetViewButton = document.getElementById("reset-view");
+const shuffleButton = document.getElementById("shuffle");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
@@ -829,6 +833,77 @@ gridEl.addEventListener(
   },
   { passive: false },
 );
+
+// Click and drag to pan. The iframe has pointer-events:none, so the cell gets
+// the pointer -- the same reason the context menu and hover-unmute work.
+let drag = null;
+
+gridEl.addEventListener("pointerdown", (event) => {
+  if (event.button !== 0) return; // left button only; right opens the menu
+  const cell = event.target.closest(".cell");
+  if (!cell || cell.dataset.empty === "true") return;
+  drag = {
+    cell,
+    index: [...gridEl.children].indexOf(cell),
+    x: event.clientX,
+    y: event.clientY,
+  };
+  cell.dataset.dragging = "true";
+  try {
+    cell.setPointerCapture(event.pointerId);
+  } catch {
+    // Capture is a convenience; the document-level pointerup still ends it.
+  }
+});
+
+gridEl.addEventListener("pointermove", (event) => {
+  if (!drag) return;
+  const dx = event.clientX - drag.x;
+  const dy = event.clientY - drag.y;
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  views.set(drag.index, panBy(views.get(drag.index) ?? IDENTITY_VIEW, dx, dy));
+  applyCoverFit(drag.cell);
+});
+
+function endDrag(event) {
+  if (!drag) return;
+  try {
+    drag.cell.releasePointerCapture(event.pointerId);
+  } catch {
+    // Already released, or never captured.
+  }
+  delete drag.cell.dataset.dragging;
+  drag = null;
+}
+
+// On the document, not the grid: a drag that leaves the window must still end.
+document.addEventListener("pointerup", endDrag);
+document.addEventListener("pointercancel", endDrag);
+
+// New videos from the same query. One search returns 50 for eight cells, so
+// there is plenty behind the wall -- and reshuffling what we already paid for
+// costs nothing. Not persisted: a reload restores the server's ranked order,
+// which is relevance, country spread and stills-to-the-back.
+shuffleButton.addEventListener("click", () => {
+  const wasPlaying = wantPlaying;
+  slotState = shuffleSlots(
+    [...slotState.slots, ...slotState.reserves],
+    cellCount(config.grid),
+  );
+  rebuild();
+  // Shuffling is not a new query, so it should not silently stop the wall.
+  // rebuild() clears wantPlaying via pre-roll; put it back if it was running.
+  wantPlaying = wasPlaying;
+});
+
+resetViewButton.addEventListener("click", () => {
+  views.clear();
+  for (const cell of gridEl.children) {
+    delete cell.dataset.zoomed;
+    applyCoverFit(cell);
+  }
+});
 
 gridEl.addEventListener("pointerover", (event) => {
   if (!hoverUnmuteCheckbox.checked) return;

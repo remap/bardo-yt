@@ -742,3 +742,214 @@ def test_reset_zoom_is_offered_and_works(running_server):
         assert reset_width < zoomed_width, f"{zoomed_width} -> {reset_width}"
         assert page.locator('.cell[data-zoomed="true"]').count() == 0
         browser.close()
+
+
+def _iframe_left(page, nth=0):
+    return page.evaluate(
+        f"""() => {{
+            const c = document.querySelectorAll('.cell')[{nth}];
+            const b = c.getBoundingClientRect();
+            const f = c.querySelector('iframe').getBoundingClientRect();
+            return f.left - b.left;
+        }}"""
+    )
+
+
+def test_drag_pans_a_zoomed_cell(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        box = page.locator(".cell").first.bounding_box()
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        page.mouse.move(cx, cy)
+        for _ in range(6):
+            page.mouse.wheel(0, -120)
+        page.wait_for_timeout(300)
+
+        before = _iframe_left(page)
+        page.mouse.move(cx, cy)
+        page.mouse.down()
+        page.mouse.move(cx - 60, cy, steps=8)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+
+        after = _iframe_left(page)
+        assert after < before - 20, f"drag did not pan: {before} -> {after}"
+
+
+def test_dragging_cannot_open_a_gap(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        box = page.locator(".cell").first.bounding_box()
+        cx = box["x"] + box["width"] / 2
+        cy = box["y"] + box["height"] / 2
+        page.mouse.move(cx, cy)
+        for _ in range(5):
+            page.mouse.wheel(0, -120)
+        page.wait_for_timeout(300)
+
+        # Haul it far past the edge in both directions.
+        page.mouse.move(cx, cy)
+        page.mouse.down()
+        page.mouse.move(cx + 2000, cy + 2000, steps=10)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+
+        covered = page.evaluate(
+            """() => {
+                const c = document.querySelector('.cell');
+                const b = c.getBoundingClientRect();
+                const f = c.querySelector('iframe').getBoundingClientRect();
+                return f.left <= b.left + 1 && f.top <= b.top + 1
+                    && f.right >= b.right - 1 && f.bottom >= b.bottom - 1;
+            }"""
+        )
+        assert covered, "dragging exposed a gap in the cell"
+
+
+def test_right_click_does_not_start_a_drag(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+        page.locator(".cell").first.click(button="right")
+        page.wait_for_selector("#menu:not([hidden])", timeout=5_000)
+        assert page.evaluate("document.querySelector('.cell').dataset.dragging") is None
+
+
+def test_reset_view_clears_zoom_and_pan_on_every_cell(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+
+        geometry = """() => [...document.querySelectorAll('.cell')].map(c => {
+            const b = c.getBoundingClientRect();
+            const f = c.querySelector('iframe').getBoundingClientRect();
+            return [f.width, f.left - b.left, f.top - b.top];
+        })"""
+
+        # Content boxes arrive asynchronously and re-crop the cell they belong
+        # to, so a baseline taken too early is stale for whichever cells had
+        # not been measured yet. Wait for two identical reads.
+        previous = None
+        for _ in range(30):
+            page.wait_for_timeout(500)
+            current = page.evaluate(geometry)
+            if current == previous:
+                break
+            previous = current
+        baseline = page.evaluate(geometry)
+
+        # Zoom two different cells and pan one of them.
+        for nth in (1, 5):
+            box = page.locator(".cell").nth(nth).bounding_box()
+            page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+            for _ in range(5):
+                page.mouse.wheel(0, -120)
+        page.wait_for_timeout(300)
+        box = page.locator(".cell").nth(1).bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(box["x"] + 10, box["y"] + 10, steps=6)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+
+        changed = page.evaluate(geometry)
+        assert changed[1][0] > baseline[1][0], f"cell 1 did not zoom: {changed[1]}"
+        assert changed[5][0] > baseline[5][0], f"cell 5 did not zoom: {changed[5]}"
+        assert abs(changed[1][1] - baseline[1][1]) > 5, f"cell 1 did not pan: {changed[1]}"
+
+        page.click("#reset-view")
+        page.wait_for_timeout(400)
+
+        restored = page.evaluate(geometry)
+        for i, (width, left, top) in enumerate(restored):
+            assert abs(width - baseline[i][0]) < 1, f"cell {i} zoom not reset: {width}"
+            assert abs(left - baseline[i][1]) < 1, f"cell {i} pan-x not reset: {left}"
+            assert abs(top - baseline[i][2]) < 1, f"cell {i} pan-y not reset: {top}"
+        browser.close()
+
+
+def test_shuffle_draws_different_videos_from_the_same_query(running_server):
+    """New videos, no new search: one query returns 50 for eight cells."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        query_before = page.evaluate("document.getElementById('status').textContent")
+        searches = []
+        page.on("request", lambda r: searches.append(r.url) if "/api/videos" in r.url else None)
+
+        page.click("#shuffle")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        assert searches == [], "shuffling must not re-resolve, let alone re-search"
+        # Same query, and every cell still filled.
+        assert (
+            page.evaluate("document.getElementById('status').textContent").split("—")[0]
+            == (query_before.split("—")[0])
+        )
+        assert page.locator('.cell[data-empty="true"]').count() == 0
+        assert page.evaluate("document.querySelectorAll('.cell iframe').length") == 8
+        browser.close()
+
+
+def test_shuffle_never_repeats_a_video_on_the_wall(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        for _ in range(3):
+            page.click("#shuffle")
+            page.wait_for_function("window.__prerolled === true", timeout=40_000)
+            ids = page.evaluate(
+                "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+            )
+            assert len(set(ids)) == len(ids), f"duplicate video on the wall: {ids}"
+        browser.close()
+
+
+def test_reloading_reverts_to_the_ranked_order(running_server):
+    """Shuffle is deliberately ephemeral -- the server's ordering is the truth."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        def ids():
+            return page.evaluate(
+                "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+            )
+
+        ranked = ids()
+        page.click("#shuffle")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+
+        page.reload(wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        assert ids() == ranked, "a reload should restore the server's ranked order"
+        browser.close()

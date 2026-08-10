@@ -17,6 +17,32 @@ export function splitSlots(videoIds, cellCount) {
   return { slots, reserves: videoIds.slice(cellCount) };
 }
 
+/**
+ * Draw a fresh set of slots at random from the whole pool.
+ *
+ * The server's order is deliberate -- relevance, spread across countries,
+ * stills pushed to the back -- so this is an explicit act, not the default,
+ * and it is not persisted: a reload restores the ranked order. One search
+ * returns 50 videos for eight cells, so there is a lot of unseen material
+ * behind the wall and reshuffling it costs no quota at all.
+ *
+ * `random` is injected so the shuffle can be tested rather than eyeballed.
+ */
+export function shuffleSlots(pool, cellCount, random = Math.random) {
+  // Deduplicated: the same video in two cells reads as a bug whatever put it
+  // there. Ranked order rarely surfaces a repeat because duplicates sit far
+  // apart in relevance; drawing at random from the whole pool does not have
+  // that protection.
+  const remaining = [...new Set(pool.filter(Boolean))];
+  // Fisher-Yates over a copy: every ordering equally likely, no bias from
+  // sort-with-random-comparator.
+  for (let i = remaining.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(random() * (i + 1));
+    [remaining[i], remaining[j]] = [remaining[j], remaining[i]];
+  }
+  return splitSlots(remaining, cellCount);
+}
+
 // `videoEmbeddable=true` is not reliable -- rights blocks, region limits and
 // post-indexing takedowns all surface as onError at play time. When that
 // happens we swap in a spare and rebuild only that one cell.
@@ -133,6 +159,22 @@ export function rectFor(cellWidth, cellHeight, content = FULL_FRAME, view = IDEN
     height: base.height,
     left: base.left + dx,
     top: base.top + dy,
+  };
+}
+
+/**
+ * Drag the picture by a pixel delta.
+ *
+ * Deliberately unclamped: rectFor does the clamping, so the stored offset can
+ * run past the edge and come back when the zoom changes. Clamping here would
+ * make a drag that overshoots stick at the limit and then refuse to return.
+ */
+export function panBy(view, dx, dy) {
+  const base = { ...IDENTITY_VIEW, ...(view ?? {}) };
+  return {
+    ...base,
+    offsetX: base.offsetX + (Number.isFinite(dx) ? dx : 0),
+    offsetY: base.offsetY + (Number.isFinite(dy) ? dy : 0),
   };
 }
 

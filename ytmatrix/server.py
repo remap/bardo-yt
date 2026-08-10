@@ -21,7 +21,7 @@ from ytmatrix import (
     wallstate,
     youtube,
 )
-from ytmatrix.config import Config, load_config, save_config
+from ytmatrix.config import Config, load_config, merge_config, save_config
 from ytmatrix.settings import Settings
 from ytmatrix.ws import ConnectionManager
 
@@ -306,8 +306,14 @@ def create_app(
 
     @app.put("/api/config")
     async def put_config(payload: dict) -> dict:
+        previous = load_config(config_path)
         try:
-            new_config = Config.model_validate(payload)
+            # Merged, not replaced: an omitted section means "leave it alone".
+            # Validating the payload alone would reset every section the
+            # sender did not know about back to its model defaults.
+            new_config = Config.model_validate(
+                merge_config(previous.model_dump(mode="json"), payload)
+            )
         except ValidationError as exc:
             # include_context=False matters: the context of a custom validator
             # error holds the original ValueError object, which is not JSON
@@ -317,7 +323,6 @@ def create_app(
                 detail=exc.errors(include_url=False, include_context=False),
             ) from exc
 
-        previous = load_config(config_path)
         save_config(new_config, config_path)
 
         # Typing a query by hand is an override: it must beat whatever Gemini
@@ -340,7 +345,11 @@ def create_app(
     @app.post("/api/cache-status")
     async def cache_status(payload: dict) -> dict:
         try:
-            candidate = Config.model_validate(payload)
+            # Same merge as the PUT, so the quota indicator predicts what
+            # saving would actually do rather than what the payload says.
+            candidate = Config.model_validate(
+                merge_config(load_config(config_path).model_dump(mode="json"), payload)
+            )
         except ValidationError as exc:
             # include_context=False matters: the context of a custom validator
             # error holds the original ValueError object, which is not JSON

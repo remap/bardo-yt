@@ -77,6 +77,12 @@ by construction and costs 100 units. It takes an explicit act:
 Everything else is free. The current query is persisted to `cache/_wall.json`,
 so a plain reload — or a server restart — restores the same wall at zero cost.
 
+**Shuffle** draws a fresh eight from the same query. A search returns 50 videos
+for eight cells, so there is a lot of unseen material behind the wall and
+reshuffling what you already paid for costs nothing. It is deliberately
+ephemeral: a reload restores the server's ranked order (relevance, spread
+across countries, stills at the back).
+
 ### Steering it
 
 The box in the header is a **metaprompt**, not a raw search. What you type goes
@@ -121,7 +127,13 @@ right-click. The menu offers:
 Point at a cell and use the wheel. Zoom is **anchored on the cursor** — the
 pixel under the pointer stays under it — and is per cell, so you can crop into
 one performer while the rest of the wall sits at its normal framing.
-**Reset zoom** in a cell's right-click menu clears it.
+**Click and drag** to pan a zoomed cell. While the picture is larger than the
+cell the pan is clamped so no gap can open at an edge; the stored offset is
+deliberately *not* clamped, so a drag that overshoots comes back instead of
+sticking at the limit.
+
+**Reset zoom** in a cell's right-click menu clears one cell; **Reset view** in
+the header clears every cell at once.
 
 Cover is where a cell *starts*, not the limit in either direction. Zooming out
 pulls back until the whole 16:9 frame is visible inside the cell and stops

@@ -949,3 +949,65 @@ def test_a_country_lookup_failure_does_not_break_the_wall(app_env, monkeypatch):
 
     assert len(body["video_ids"]) == 8
     assert body["video_ids"] == ids[:8], "unknown origin should leave order alone"
+
+
+def test_saving_config_does_not_switch_query_generation_off(generating_env, monkeypatch):
+    """The config page has no field for query_generation, and used to send a
+    payload without it -- which reset it to its default of disabled."""
+    app, _config_path, cache_dir = generating_env
+    seed_cache(cache_dir)
+    page_payload = {
+        "query": "golden cover",
+        "grid": {"cols": 4, "rows": 2},
+        "search": VALID["search"],
+        "playback": VALID["playback"],
+        "cache": {"ttl_hours": 24},
+    }
+
+    with TestClient(app) as client:
+        assert client.put("/api/config", json=page_payload).status_code == 200
+        after = client.get("/api/config").json()
+
+    assert after["query_generation"]["enabled"] is True
+    assert after["query_generation"]["theme"] == GENERATING["query_generation"]["theme"]
+
+
+def test_a_partial_save_preserves_filtering_and_quota(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    seed_cache(cache_dir)
+    stub_search(monkeypatch)  # the changed query is a cache miss
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                **VALID,
+                "filtering": {"skip_static": False, "static_threshold": 9.5},
+                "quota": {"daily_limit_units": 1234},
+            }
+        )
+    )
+    with TestClient(app) as client:
+        client.put("/api/config", json={"query": "something else"})
+        after = client.get("/api/config").json()
+
+    assert after["filtering"]["static_threshold"] == 9.5
+    assert after["filtering"]["skip_static"] is False
+    assert after["quota"]["daily_limit_units"] == 1234
+    assert after["query"] == "something else"
+
+
+def test_new_query_still_works_after_a_config_save(generating_env, monkeypatch):
+    """End to end for the reported failure: Save, then New query."""
+    app, _config_path, cache_dir = generating_env
+    seed_cache(cache_dir)
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        return "still working"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.put("/api/config", json={"grid": {"cols": 4, "rows": 4}})
+        response = client.post("/api/new-query")
+
+    assert response.status_code == 200, response.json()
+    assert response.json()["query"] == "still working"

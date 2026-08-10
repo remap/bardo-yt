@@ -163,6 +163,26 @@ class Config(Strict):
         return self
 
 
+def merge_config(current: dict, payload: dict) -> dict:
+    """Overlay an edit onto the existing config, section by section.
+
+    Every section has model defaults, so validating a partial payload on its
+    own does not fail -- it silently *resets* whatever the sender omitted. A
+    config page that only knows about query/grid/search/playback therefore
+    wiped query_generation, filtering and quota back to defaults on every
+    save, which is how query generation ended up switched off by pressing
+    Save. Merging first makes an omitted section mean "leave it alone", which
+    is what every caller actually intends.
+    """
+    merged = dict(current)
+    for key, value in payload.items():
+        if isinstance(value, dict) and isinstance(current.get(key), dict):
+            merged[key] = {**current[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config(path: Path) -> Config:
     return Config.model_validate(yaml.safe_load(path.read_text()) or {})
 
