@@ -30,6 +30,7 @@ def build_params(
     video_duration: str,
     safe_search: str,
     relevance_language: str | None,
+    video_license: str = "any",
 ) -> dict[str, str]:
     """Build the upstream parameter set, excluding the API key.
 
@@ -42,12 +43,18 @@ def build_params(
         # video id, and non-embeddable videos cannot go on the wall at all.
         "type": "video",
         "videoEmbeddable": "true",
+        # Also forced. Un-syndicated videos refuse to play outside youtube.com
+        # and render a "Watch on YouTube" click-through where the video should
+        # be -- a dead cell on the wall, and exactly the thing to avoid.
+        "videoSyndicated": "true",
         "maxResults": str(MAX_RESULTS),
         "q": query,
         "order": order,
         "videoDuration": video_duration,
         "safeSearch": safe_search,
     }
+    if video_license and video_license != "any":
+        params["videoLicense"] = video_license
     if relevance_language:
         params["relevanceLanguage"] = relevance_language
     return params

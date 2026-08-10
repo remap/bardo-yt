@@ -93,7 +93,32 @@ directory as a module on Node 23 and fails.
 6. **The Play button is a mechanism, not decoration.** Browsers throttle many
    simultaneous autoplaying players; the click is the user gesture that lets
    them all start. Removing it in favor of pure autoplay will produce a grid
-   where an arbitrary subset of cells silently never starts.
+   where an arbitrary subset of cells silently never starts. It stays
+   **disabled until the whole set has pre-rolled**, so there is no window in
+   which pressing it starts only some cells.
+
+18. **Nothing starts until every player has buffered.** `prerollCurrentSet()`
+    plays each player muted, waits for all of them to report loaded content,
+    then pauses and rewinds them together. Without it the wall trickles in and
+    a new query leaves the first video seconds ahead of the last. It always
+    pre-rolls muted regardless of the mute button, because a muted play is the
+    only kind a browser starts without a gesture; the real mute state is
+    restored afterwards. `generation` guards against a pre-roll for a
+    discarded set starting players belonging to its replacement.
+
+19. **Loop by restarting *before* the end, never on ENDED.** YouTube draws its
+    end-screen suggestion grid over the video as it finishes, so by the time
+    ENDED fires the cards are already visible. The interval in `player.js`
+    seeks back `LOOP_GUARD_SECONDS` short of the end. The ENDED handler is a
+    backstop for when one slips through, not the mechanism.
+
+20. **Ads cannot be disabled or skipped — the API has no control over them.**
+    `video_duration: short` avoids mid-rolls (YouTube only allows them at 8
+    minutes and up) and `video_license: creativeCommon` avoids most monetised
+    uploads, but neither stops a pre-roll. `videoSyndicated=true` is forced
+    alongside `videoEmbeddable=true` to keep out videos that render a "Watch
+    on YouTube" click-through instead of playing. Anything more requires
+    leaving embeds behind entirely.
 
 7. **Know which chrome suppressions actually work.** Do not spend time on the
    dead ones or re-add them:

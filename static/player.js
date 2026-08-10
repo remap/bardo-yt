@@ -4,6 +4,8 @@ import {
   classifyConfigChange,
   cellCount,
   coverRect,
+  shouldRestart,
+  prerollComplete,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
@@ -13,13 +15,32 @@ const playButton = document.getElementById("play");
 const pauseButton = document.getElementById("pause");
 const muteButton = document.getElementById("mute");
 const newQueryButton = document.getElementById("new-query");
+const followCheckbox = document.getElementById("follow");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
 let players = [];
 let apiReady = false;
-let hasPlayed = false;
-let paused = false;
+
+// What the user wants playback to be doing. Distinct from what the players are
+// actually doing, which lags behind while a new set pre-rolls.
+let wantPlaying = false;
+// True once every player in the current set has buffered. Until then nothing
+// is allowed to start, so eight videos begin together instead of trickling in.
+let prerolled = false;
+// Bumped on every rebuild so a pre-roll for a discarded set cannot start
+// players belonging to the set that replaced it.
+let generation = 0;
+
+const PREROLL_TIMEOUT_MS = 25000;
+const PREROLL_POLL_MS = 250;
+const LOOP_POLL_MS = 500;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function livePlayers() {
+  return players.filter(Boolean);
+}
 // Runtime mute state, seeded from config on first load and thereafter owned by
 // the button. Kept separate from config.playback.muted so a config push does
 // not silently undo what the user just clicked.
@@ -119,6 +140,10 @@ whenYouTubeApiReady(() => {
   rebuild();
 });
 
+// The "<query> — N playing · cached · 900/5000 units today" line. Kept around
+// so transient states (pre-rolling, ready) can be appended without losing it.
+let statusPrefix = "loading…";
+
 function setStatus(text, state = "") {
   statusEl.textContent = text;
   statusEl.dataset.state = state;
@@ -189,19 +214,20 @@ function makePlayer({ mount, videoId }, index) {
         applyCoverFit(cell);
         // Detect this video's black bars and re-crop past them once known.
         loadContentBox(cell?.dataset.videoId, cell);
-        // Do not resurrect playback the user deliberately paused.
-        if (hasPlayed && !paused && config.playback.autoplay_on_change) {
-          event.target.playVideo();
-        }
+        // Starting is not this handler's job -- prerollCurrentSet() owns it,
+        // so that nothing begins until every cell is buffered.
       },
       onError: () => handlePlayerError(index),
       onStateChange: (event) => {
         // The captions module only exists once playback has begun, so the
         // onReady attempt above is often too early to have had any effect.
         if (event.data === YT.PlayerState.PLAYING) suppressCaptions(event.target);
+        // Backstop only. The loop guard above should restart a video before it
+        // ever reaches ENDED; if one slips through, recover rather than leave
+        // a cell sitting on the end screen.
         if (event.data === YT.PlayerState.ENDED && config.playback.loop) {
-          event.target.seekTo(config.playback.start_offset);
-          event.target.playVideo();
+          event.target.seekTo(config.playback.start_offset, true);
+          if (wantPlaying) event.target.playVideo();
         }
       },
     },
@@ -245,7 +271,140 @@ function rebuild() {
   players = cells.map((cell, index) => makePlayer(cell, index));
   // Exposed for the browser smoke test to assert against.
   window.__players = players;
+  prerolled = false;
+  window.__prerolled = false;
+  refreshControls();
+  prerollCurrentSet(++generation);
 }
+
+function refreshControls() {
+  playButton.disabled = !prerolled;
+  window.__wantPlaying = wantPlaying;
+}
+
+/**
+ * Buffer every player before letting any of them start.
+ *
+ * Without this the wall trickles in -- one cell plays while three are still
+ * fetching -- which looks broken and, on a new query, means the first video
+ * is several seconds ahead of the last. Pre-rolling is done muted regardless
+ * of the mute button, because a muted play is the only kind a browser will
+ * start without a gesture; the real mute state is restored afterwards.
+ */
+async function prerollCurrentSet(token) {
+  const set = livePlayers();
+  if (set.length === 0) {
+    prerolled = true;
+    window.__prerolled = true;
+    refreshControls();
+    return;
+  }
+
+  setStatus(`${statusPrefix} · pre-rolling…`, "busy");
+
+  // Wait for the API to attach its methods before touching any of them.
+  const deadline = Date.now() + PREROLL_TIMEOUT_MS;
+  while (Date.now() < deadline && generation === token) {
+    if (set.every((player) => typeof player.getVideoLoadedFraction === "function")) break;
+    await sleep(PREROLL_POLL_MS);
+  }
+  if (generation !== token) return;
+
+  for (const player of set) {
+    try {
+      player.mute();
+      player.playVideo();
+    } catch {
+      // A player torn down mid-preroll; the generation check catches it.
+    }
+  }
+
+  while (Date.now() < deadline && generation === token) {
+    const fractions = set.map((player) => {
+      try {
+        return player.getVideoLoadedFraction();
+      } catch {
+        return 0;
+      }
+    });
+    if (prerollComplete(fractions)) break;
+    await sleep(PREROLL_POLL_MS);
+  }
+  if (generation !== token) return;
+
+  // Park every player back at the start, together.
+  for (const player of set) {
+    try {
+      player.pauseVideo();
+      player.seekTo(config.playback.start_offset, true);
+      applyMuteState(player);
+    } catch {
+      // Same as above.
+    }
+  }
+
+  prerolled = true;
+  window.__prerolled = true;
+  refreshControls();
+
+  // A new set starts paused unless the user asked it to follow the play state.
+  if (wantPlaying && followCheckbox.checked) {
+    startAll();
+  } else {
+    wantPlaying = false;
+    refreshControls();
+    setStatus(`${statusPrefix} · ready — press Play`);
+  }
+}
+
+function startAll() {
+  if (!prerolled) return;
+  wantPlaying = true;
+  refreshControls();
+  for (const player of livePlayers()) {
+    try {
+      player.playVideo();
+    } catch {
+      // Nothing useful to do.
+    }
+  }
+  setStatus(statusPrefix);
+}
+
+function pauseAll() {
+  wantPlaying = false;
+  refreshControls();
+  for (const player of livePlayers()) {
+    try {
+      player.pauseVideo();
+    } catch {
+      // Nothing useful to do.
+    }
+  }
+}
+
+/**
+ * Restart each video shortly before it ends.
+ *
+ * Looping on the ENDED event is too late: YouTube draws its end-screen
+ * suggestion grid over the video as it finishes, so by the time the event
+ * fires the cards are already on screen. Never letting playback reach the end
+ * is the only way to keep them away.
+ */
+setInterval(() => {
+  if (!config?.playback?.loop || !wantPlaying) return;
+  for (const player of livePlayers()) {
+    try {
+      if (typeof player.getDuration !== "function") continue;
+      if (shouldRestart(player.getCurrentTime(), player.getDuration())) {
+        player.seekTo(config.playback.start_offset, true);
+        player.playVideo();
+      }
+    } catch {
+      // A player mid-teardown; skip it.
+    }
+  }
+}, LOOP_POLL_MS);
 
 function applyInPlace() {
   for (const player of players) {
@@ -264,13 +423,15 @@ function applyVideos(message) {
   const spent = message.units_spent_today ?? 0;
   const limit = message.daily_limit_units ?? 0;
   const budgetText = limit ? ` · ${spent}/${limit} units today` : ` · ${spent} units today`;
-  setStatus(
+  const relaxed = message.static_relaxed
+    ? ` · ${message.static_relaxed} still${message.static_relaxed === 1 ? "" : "s"}`
+    : "";
+  statusPrefix =
     notes[message.note] ??
-      `“${message.query}” — ${message.video_ids.filter(Boolean).length} playing · ${
-        message.from_cache ? "cached" : "fresh search"
-      }${budgetText}`,
-    message.note ? "error" : "",
-  );
+    `“${message.query}” — ${message.video_ids.filter(Boolean).length} videos · ${
+      message.from_cache ? "cached" : "fresh search"
+    }${relaxed}${budgetText}`;
+  setStatus(statusPrefix, message.note ? "error" : "");
   rebuild();
 }
 
@@ -279,6 +440,7 @@ function applyVideos(message) {
 // act -- the New query button, or ?new=true.
 let requestedNewThisPageLoad = false;
 let seededMuteFromConfig = false;
+let seededFollowFromConfig = false;
 
 async function requestNewQuery() {
   newQueryButton.disabled = true;
@@ -310,6 +472,12 @@ async function resync() {
 
   newQueryButton.hidden = !config.query_generation?.enabled;
 
+  // Seed the checkbox from config once; after that it is the user's switch.
+  if (!seededFollowFromConfig) {
+    seededFollowFromConfig = true;
+    followCheckbox.checked = Boolean(config.playback.autoplay_on_change);
+  }
+
   const wantsNew = new URLSearchParams(window.location.search).get("new") === "true";
   if (wantsNew && config.query_generation?.enabled && !requestedNewThisPageLoad) {
     requestedNewThisPageLoad = true;
@@ -331,18 +499,11 @@ async function resync() {
 
 newQueryButton.addEventListener("click", requestNewQuery);
 
-playButton.addEventListener("click", () => {
-  hasPlayed = true;
-  paused = false;
-  // Eight muted players starting at once is exactly what browsers throttle.
-  // This click is the user gesture that makes them all start.
-  for (const player of players) player?.playVideo?.();
-});
-
-pauseButton.addEventListener("click", () => {
-  paused = true;
-  for (const player of players) player?.pauseVideo?.();
-});
+// Eight players starting at once is exactly what browsers throttle; this click
+// is the user gesture that makes them all start. It is disabled until the set
+// has pre-rolled, so there is no window where pressing it starts only some.
+playButton.addEventListener("click", startAll);
+pauseButton.addEventListener("click", pauseAll);
 
 muteButton.addEventListener("click", () => {
   muted = !muted;
@@ -353,6 +514,7 @@ muteButton.addEventListener("click", () => {
 });
 
 refreshMuteButton();
+refreshControls();
 
 connectSocket({
   onReconnect: resync,

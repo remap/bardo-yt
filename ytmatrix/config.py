@@ -45,11 +45,23 @@ class Grid(Strict):
         return self.cols * self.rows
 
 
+class VideoLicense(StrEnum):
+    ANY = "any"
+    # Creative Commons uploads are overwhelmingly unmonetised, so they carry
+    # far fewer ads. The pool is much smaller, though -- for most music
+    # searches, restrictively so.
+    CREATIVE_COMMON = "creativeCommon"
+
+
 class SearchConfig(Strict):
     order: Order = Order.RELEVANCE
-    video_duration: VideoDuration = VideoDuration.ANY
+    # `short` (<4 min) is the ad-conscious default: YouTube only permits
+    # mid-roll breaks on videos of 8 minutes or more, so short videos can be
+    # interrupted at most once, at the start. It cannot prevent pre-rolls.
+    video_duration: VideoDuration = VideoDuration.SHORT
     safe_search: SafeSearch = SafeSearch.MODERATE
     relevance_language: str | None = None
+    video_license: VideoLicense = VideoLicense.ANY
 
 
 class PlaybackConfig(Strict):
@@ -58,7 +70,10 @@ class PlaybackConfig(Strict):
     # because browsers only permit autoplay when muted -- start unmuted and an
     # arbitrary subset of players silently refuses to begin.
     muted: bool = True
-    autoplay_on_change: bool = True
+    # Seeds the wall's "follow play state" checkbox. Off by default: a new
+    # query lands paused and pre-rolled, waiting for a human, rather than
+    # bursting into eight fresh videos on its own.
+    autoplay_on_change: bool = False
     start_offset: int = Field(default=0, ge=0)
     loop: bool = True
 
@@ -76,7 +91,11 @@ class QueryGenerationConfig(Strict):
     """
 
     enabled: bool = False
-    theme: str = "cover songs and reinterpretations"
+    theme: str = (
+        "K-pop: covers and reinterpretations of K-pop songs, and K-pop songs "
+        "themselves -- dance practice, live stage, busking, band and acoustic "
+        "versions, choreography, reaction-free performance footage"
+    )
     model: str = "gemini-3.6-flash"
     # How many previously generated queries to show Gemini so it does not
     # circle back to one already paid for.

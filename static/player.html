@@ -23,6 +23,13 @@
   button:hover { background: #26262d; }
   #status { color: #8a8a94; }
   #status[data-state="error"] { color: #e0685f; }
+  #status[data-state="busy"] { color: #d8a657; }
+  button:disabled { opacity: .45; cursor: default; }
+  #follow-label {
+    display: flex; align-items: center; gap: 6px;
+    color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
+  }
+  #follow-label input { cursor: pointer; }
   a { color: #8a8a94; margin-left: auto; }
   #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
   /* overflow:hidden is what performs the crop -- player.js oversizes the
@@ -49,6 +56,9 @@
     <button id="new-query" title="Invents a new query with Gemini. Costs 100 quota units.">
       New query
     </button>
+    <label id="follow-label" title="When off, a new query loads paused and waits for you.">
+      <input type="checkbox" id="follow"> follow play state
+    </label>
     <span id="status">loading…</span>
     <a href="/config">config →</a>
   </header>

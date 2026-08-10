@@ -165,11 +165,26 @@ These are inherent to embedding, not bugs:
 
 1. **Some chrome is unreachable.** Controls, annotations, captions and the
    hover title bar are all suppressed (see `CLAUDE.md` for which parameter does
-   what and which are deprecated no-ops). End-screen suggestions on a finished
-   video are not, and text **burned into the video's own pixels** — creator
-   subtitles, tracklists — is part of the picture and cannot be touched.
-2. **Ads play** and interrupt the grid.
-3. **Concurrent iframes are heavy** — each is a full nested browsing context.
+   what and which are deprecated no-ops). Text **burned into the video's own
+   pixels** — creator subtitles, tracklists — is part of the picture and cannot
+   be touched.
+2. **Ads cannot be disabled or skipped.** The IFrame Player API offers no
+   control over them at all. What the config *can* do is make them rarer:
+   - `video_duration: short` (the default) — YouTube only permits mid-roll
+     breaks on videos of 8 minutes or more, so short videos can be interrupted
+     at most once, at the start. It cannot stop pre-rolls.
+   - `video_license: creativeCommon` — CC uploads are overwhelmingly
+     unmonetised and carry far fewer ads. The trade-off is a much smaller
+     result pool; for most music searches, restrictively so. Off by default.
+
+   Genuinely ad-free means not using embeds — downloaded files played through
+   `<video>`, the approach deliberately deferred in the design spec.
+3. **Click-throughs are avoided where they can be.** `videoSyndicated=true` is
+   forced alongside `videoEmbeddable=true`, which keeps out videos that render
+   a "Watch on YouTube" panel instead of playing. Age-gated videos that demand
+   sign-in still exist; they surface as an `onError` and get substituted from
+   the reserve pool.
+4. **Concurrent iframes are heavy** — each is a full nested browsing context.
 4. **Non-16:9 sources still box themselves.** The iframe is cropped to fill its
    cell, but YouTube pillarboxes a vertically-shot video *inside* its own
    player, and that is cross-origin.

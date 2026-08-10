@@ -6,7 +6,66 @@ import {
   classifyConfigChange,
   cellCount,
   coverRect,
+  shouldRestart,
+  prerollComplete,
+  LOOP_GUARD_SECONDS,
 } from "./grid-logic.js";
+
+// Looping before the end, so end-screen cards never get drawn.
+
+test("shouldRestart is false in the middle of a video", () => {
+  assert.equal(shouldRestart(30, 240), false);
+});
+
+test("shouldRestart becomes true just before the end", () => {
+  assert.equal(shouldRestart(240 - LOOP_GUARD_SECONDS, 240), true);
+  assert.equal(shouldRestart(239.9, 240), true);
+});
+
+test("shouldRestart fires before the ENDED event would", () => {
+  // The whole point: never reach the end, because that is when YouTube draws
+  // the suggestion grid over the video.
+  assert.equal(shouldRestart(238.9, 240), true, "should restart with time to spare");
+});
+
+test("shouldRestart is false while duration is still unknown", () => {
+  // duration reads 0 until metadata loads; restarting then would loop forever.
+  assert.equal(shouldRestart(0, 0), false);
+  assert.equal(shouldRestart(5, 0), false);
+});
+
+test("shouldRestart is false for a live stream reporting no duration", () => {
+  assert.equal(shouldRestart(9999, 0), false);
+});
+
+test("shouldRestart ignores a video shorter than the guard", () => {
+  assert.equal(shouldRestart(0.5, 1), false);
+});
+
+test("shouldRestart rejects non-finite readings", () => {
+  assert.equal(shouldRestart(NaN, 240), false);
+  assert.equal(shouldRestart(10, NaN), false);
+  assert.equal(shouldRestart(10, Infinity), false);
+});
+
+// Pre-roll gating.
+
+test("prerollComplete is false while any player has buffered nothing", () => {
+  assert.equal(prerollComplete([0.5, 0.2, 0]), false);
+});
+
+test("prerollComplete is true once every player has buffered", () => {
+  assert.equal(prerollComplete([0.05, 0.02, 0.3]), true);
+});
+
+test("prerollComplete treats a missing reading as not ready", () => {
+  assert.equal(prerollComplete([0.5, null, 0.5]), false);
+  assert.equal(prerollComplete([0.5, undefined]), false);
+});
+
+test("prerollComplete is true for an empty wall rather than hanging", () => {
+  assert.equal(prerollComplete([]), true);
+});
 
 // Cover-fit: fill the cell in both axes and crop the overflow, centered.
 // A YouTube iframe is always 16:9 internally, so any cell that is not 16:9

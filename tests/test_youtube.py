@@ -168,3 +168,26 @@ async def test_the_api_key_never_appears_in_an_error_message():
         with pytest.raises(youtube.SearchError) as excinfo:
             await youtube.search({"q": "x"}, "SUPERSECRETKEY", client=client)
     assert "SUPERSECRETKEY" not in str(excinfo.value)
+
+
+def test_build_params_forces_syndication():
+    # Un-syndicated videos refuse to play outside youtube.com and render a
+    # "Watch on YouTube" click-through instead -- a dead cell on the wall.
+    params = youtube.build_params("q", "relevance", "any", "moderate", None)
+    assert params["videoSyndicated"] == "true"
+
+
+def test_build_params_omits_the_license_filter_by_default():
+    params = youtube.build_params("q", "relevance", "any", "moderate", None)
+    assert "videoLicense" not in params
+
+
+def test_build_params_can_restrict_to_creative_commons():
+    params = youtube.build_params("q", "relevance", "any", "moderate", None, "creativeCommon")
+    assert params["videoLicense"] == "creativeCommon"
+
+
+def test_the_license_filter_changes_the_cache_key_inputs():
+    plain = youtube.build_params("q", "relevance", "any", "moderate", None)
+    cc = youtube.build_params("q", "relevance", "any", "moderate", None, "creativeCommon")
+    assert plain != cc, "a license change must not silently reuse cached results"

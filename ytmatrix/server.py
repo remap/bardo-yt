@@ -29,6 +29,7 @@ def search_params_for(config: Config, query: str | None = None) -> dict[str, str
         config.search.video_duration.value,
         config.search.safe_search.value,
         config.search.relevance_language,
+        config.search.video_license.value,
     )
 
 

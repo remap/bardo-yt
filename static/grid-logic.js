@@ -61,6 +61,27 @@ export function coverRect(cellWidth, cellHeight, content = FULL_FRAME) {
   };
 }
 
+// Looping by waiting for the ENDED event is what summons end-screen cards:
+// by the time YouTube fires it, the suggestion grid is already drawn over the
+// video. So restart just *before* the end instead and never let it finish.
+export const LOOP_GUARD_SECONDS = 1.25;
+
+export function shouldRestart(currentTime, duration, guard = LOOP_GUARD_SECONDS) {
+  if (!Number.isFinite(currentTime) || !Number.isFinite(duration)) return false;
+  // duration is 0 until metadata loads, and a live stream reports 0 forever.
+  if (duration <= guard) return false;
+  return currentTime >= duration - guard;
+}
+
+// Pre-roll: every player must have buffered something before any of them are
+// allowed to start, so eight videos begin together rather than trickling in.
+export const PREROLL_MIN_FRACTION = 0.01;
+
+export function prerollComplete(fractions, minFraction = PREROLL_MIN_FRACTION) {
+  if (fractions.length === 0) return true;
+  return fractions.every((fraction) => (fraction ?? 0) >= minFraction);
+}
+
 const REBUILD_KEYS = ["grid"];
 const IN_PLACE_KEYS = ["playback"];
 

@@ -175,6 +175,7 @@ def test_one_play_click_reaches_every_player(running_server):
                 player.playVideo = () => { window.__playCalls += 1; return original(); };
             }
         """)
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
         page.click("#play")
         # >= 8, not == 8. A player whose onReady lands after the click starts
         # itself (hasPlayed is set), so extra calls are the self-healing path
@@ -193,6 +194,10 @@ def test_pause_stops_every_player(running_server):
             "window.__players?.every(p => typeof p?.pauseVideo === 'function')", timeout=25_000
         )
 
+        # Wrap only AFTER pre-roll: pre-roll pauses every player itself, so
+        # counting from before it would let this test pass even if the button
+        # did nothing at all.
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
         page.evaluate("""
             window.__pauseCalls = 0;
             for (const player of window.__players) {
@@ -203,6 +208,32 @@ def test_pause_stops_every_player(running_server):
         page.click("#play")
         page.click("#pause")
         page.wait_for_function("window.__pauseCalls >= 8", timeout=15_000)
+        browser.close()
+
+
+def test_a_new_set_stays_paused_until_pre_rolled(running_server):
+    """Nothing starts until every cell has buffered, and not even then."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+
+        # Play is unavailable while the set is still pre-rolling, so there is
+        # no window in which pressing it starts only some of the cells.
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+        assert page.locator("#play").is_disabled() or page.evaluate("window.__prerolled === true")
+
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        assert page.locator("#play").is_enabled()
+
+        # Pre-rolled, but deliberately not playing: the wall waits for a human.
+        assert page.evaluate("window.__wantPlaying") is False
+        states = page.evaluate("window.__players.map(p => p.getPlayerState())")
+        assert all(state != 1 for state in states), f"something started on its own: {states}"
+
+        # And every player is parked at the beginning, not mid-buffer.
+        times = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+        assert all(t < 3 for t in times), f"players were not rewound after pre-roll: {times}"
         browser.close()
 
 
@@ -218,6 +249,7 @@ def test_the_wall_starts_muted_and_the_button_unmutes_every_player(running_serve
         assert page.locator("#mute").text_content().strip() == "Unmute all"
         assert page.evaluate("window.__players.every(p => p.isMuted())"), "should start muted"
 
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
         page.click("#play")
         page.click("#mute")
         page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=15_000)

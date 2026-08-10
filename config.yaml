@@ -4,19 +4,22 @@ grid:
   rows: 2
 search:
   order: relevance
-  video_duration: any
+  video_duration: short
   safe_search: moderate
   relevance_language: en
+  video_license: any
 playback:
   muted: true
-  autoplay_on_change: true
+  autoplay_on_change: false
   start_offset: 0
   loop: true
 cache:
   ttl_hours: 24.0
 query_generation:
   enabled: true
-  theme: cover songs and reinterpretations
+  theme: 'K-pop: covers and reinterpretations of K-pop songs, and K-pop songs
+    themselves -- dance practice, live stage, busking, band and acoustic
+    versions, choreography, reaction-free performance footage'
   model: gemini-3.6-flash
   avoid_repeats: 20
 quota:
