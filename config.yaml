@@ -17,9 +17,9 @@ cache:
   ttl_hours: 24.0
 query_generation:
   enabled: true
-  theme: 'K-pop: covers and reinterpretations of K-pop songs, and K-pop songs
-    themselves -- dance practice, live stage, busking, band and acoustic
-    versions, choreography, reaction-free performance footage'
+  theme: 'K-pop covers: other people performing K-pop songs -- dance covers,
+    dance practice, busking, street and stage performances, acoustic and band
+    reinterpretations. Always covers, never the official artist upload.'
   model: gemini-3.6-flash
   avoid_repeats: 20
 quota:

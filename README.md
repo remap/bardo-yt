@@ -36,6 +36,10 @@ Two pages:
 - **`/`** — the wall. **Play all** / **Pause all** / **Unmute all** drive every
   cell at once. It starts muted because browsers only autoplay muted video;
   the button supplies the user gesture that unmuting requires.
+  **hover to unmute** makes exactly one cell audible — whichever the cursor is
+  over — and outlines it. Leaving the grid restores the global state. Same
+  trick as the context menu: `pointer-events: none` on the iframe means the
+  cell, not YouTube, receives the pointer.
 - **`/config`** — live editor. Saving pushes to the wall over a WebSocket.
 
 ## Authentication
@@ -160,6 +164,32 @@ This costs no quota and only measures as deep as it needs to
 The other half is the query itself: Gemini is told to favour words implying a
 filmed event (live, session, busking, rehearsal, street) and to avoid the ones
 that attract static uploads (album, playlist, lyrics, audio, mix, 1 hour).
+
+## Country diversity
+
+On by default (`filtering.prefer_country_diversity`). Eight cells of the same
+song from eight different countries is a far better wall than eight from one.
+
+`search.list` returns no country field, so it takes two more calls —
+`videos.list` for the channel id, `channels.list` for `snippet.country` —
+both batched 50 ids at a time at **1 unit each**. That is 2 units against the
+100 the search already cost, and results are cached per video forever.
+
+Coverage is partial: on a real result set 29 of 50 videos had a published
+country, spanning 12 of them. So this **reorders and never drops** — videos of
+unknown origin form one bucket and take their turn like any other country,
+rather than being penalised or crowding out the ones we do know.
+
+The reordering is a round-robin across countries in order of first appearance,
+so the top search result stays first and relevance is preserved within each
+country. A real run of `LE SSERAFIM Antifragile dance cover street`:
+
+```
+1. unknown   [KPOP IN PUBLIC | ONE TAKE] …      5. AT   [KPOP IN PUBLIC VIENNA] …
+2. KR        [🦋ARTBEAT] 커버댄스 Dance Cover      6. HK   [LE SSERAFIM] KPOP IN PUBLIC …
+3. ES        [KPOP IN PUBLIC] Dance Cover        7. TW   [KPOP IN PUBLIC CHALLENGE] …
+4. US        [KPOP IN PUBLIC - NYC] …            8. RU   [K-POP IN PUBLIC | ONE TAKE] …
+```
 
 ## Letterbox detection
 

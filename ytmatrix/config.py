@@ -92,9 +92,9 @@ class QueryGenerationConfig(Strict):
 
     enabled: bool = False
     theme: str = (
-        "K-pop: covers and reinterpretations of K-pop songs, and K-pop songs "
-        "themselves -- dance practice, live stage, busking, band and acoustic "
-        "versions, choreography, reaction-free performance footage"
+        "K-pop covers: other people performing K-pop songs -- dance covers, "
+        "dance practice, busking, street and stage performances, acoustic and "
+        "band reinterpretations. Always covers, never the official artist upload."
     )
     model: str = "gemini-3.6-flash"
     # How many previously generated queries to show Gemini so it does not
@@ -111,6 +111,12 @@ class FilteringConfig(Strict):
     """
 
     skip_static: bool = True
+    # Spread the wall across countries of origin where the metadata allows.
+    # search.list carries no country field; recovering it costs 2 quota units
+    # per new query (videos.list + channels.list, both batched 50 at a time)
+    # against the 100 the search itself costs. Coverage is partial -- roughly
+    # 60% of channels publish a country -- so this reorders, it never drops.
+    prefer_country_diversity: bool = True
     # Mean frame-to-frame luma difference below which a video counts as a still.
     # Measured stills cluster under 2.5; real footage starts around 5.
     static_threshold: float = Field(default=3.5, ge=0)

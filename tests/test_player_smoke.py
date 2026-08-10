@@ -544,3 +544,66 @@ def test_no_cell_is_left_running_after_pre_roll(running_server):
         assert all(s != 1 for s in states), f"a cell reports PLAYING: {states}"
         assert all(t < 3 for t in second), f"players drifted instead of parking: {second}"
         browser.close()
+
+
+def test_hover_to_unmute_makes_exactly_one_cell_audible(running_server):
+    """Point at a cell and only that cell has sound.
+
+    Works for the same reason the context menu does: the iframe has
+    pointer-events:none, so the cell receives the pointer, not YouTube.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        page.check("#hover-unmute")
+        # Nothing hovered yet: the global mute state still rules.
+        assert page.evaluate("window.__players.every(p => p.isMuted())")
+
+        page.locator(".cell").nth(3).hover()
+        page.wait_for_function(
+            "window.__players.filter(p => !p.isMuted()).length === 1", timeout=10_000
+        )
+        muted_flags = page.evaluate("window.__players.map(p => p.isMuted())")
+        assert muted_flags[3] is False, muted_flags
+        assert sum(1 for m in muted_flags if not m) == 1
+
+        # Move to a different cell: the audible one moves with the cursor.
+        page.locator(".cell").nth(6).hover()
+        page.wait_for_function("window.__players[6].isMuted() === false", timeout=10_000)
+        assert page.evaluate("window.__players[3].isMuted()") is True
+        assert page.locator('.cell[data-audible="true"]').count() == 1
+
+        # Leaving the grid restores the global state -- nothing stays audible.
+        page.locator("#status").hover()
+        page.wait_for_function("window.__players.every(p => p.isMuted())", timeout=10_000)
+        assert page.locator('.cell[data-audible="true"]').count() == 0
+        browser.close()
+
+
+def test_turning_hover_unmute_off_restores_the_global_state(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        page.click("#mute")  # unmute everything globally
+        page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=10_000)
+
+        page.check("#hover-unmute")
+        page.locator(".cell").nth(2).hover()
+        page.wait_for_function(
+            "window.__players.filter(p => !p.isMuted()).length === 1", timeout=10_000
+        )
+
+        # Unchecking must not strand seven cells muted.
+        page.uncheck("#hover-unmute")
+        page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=10_000)
+        browser.close()

@@ -20,6 +20,13 @@ def no_thumbnail_fetches(request, monkeypatch):
 
     monkeypatch.setattr(server, "motion_score", unmeasured)
 
+    # Country lookup is two more network calls per query. Same rule: no test
+    # in the default suite touches the wire.
+    async def no_countries(video_ids, cache_dir, api_key):
+        return {}
+
+    monkeypatch.setattr(server, "video_countries", no_countries)
+
 
 @pytest.fixture(autouse=True)
 def no_live_api(request, monkeypatch):

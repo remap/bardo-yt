@@ -10,7 +10,17 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, letterbox, motion, querylog, wallstate, youtube
+from ytmatrix import (
+    budget,
+    cache,
+    gemini,
+    letterbox,
+    motion,
+    origin,
+    querylog,
+    wallstate,
+    youtube,
+)
 from ytmatrix.config import Config, load_config, save_config
 from ytmatrix.settings import Settings
 from ytmatrix.ws import ConnectionManager
@@ -100,9 +110,89 @@ async def motion_score(video_id: str, cache_dir: Path, client: httpx.AsyncClient
     return score
 
 
-async def select_videos(config: Config, video_ids: list[str], cache_dir: Path) -> dict:
-    """Order the results so the wall shows things that actually move."""
-    if not config.filtering.skip_static or not video_ids:
+async def video_countries(video_ids: list[str], cache_dir: Path, api_key: str) -> dict[str, str]:
+    """video id -> ISO country, for the ids we can resolve.
+
+    Two batched calls at 1 unit each, versus 100 for the search itself.
+    Results are cached per video forever -- a video does not change origin.
+    Any failure returns what it has: diversity is a preference, not a
+    requirement, and must never stop the wall from resolving.
+    """
+    store = cache_dir / "origin"
+    known: dict[str, str] = {}
+    missing: list[str] = []
+    for video_id in video_ids:
+        entry = store / f"{video_id}.json"
+        if entry.exists():
+            try:
+                country = json.loads(entry.read_text()).get("country")
+                if country:
+                    known[video_id] = country
+                continue
+            except (json.JSONDecodeError, OSError):
+                pass
+        missing.append(video_id)
+
+    if not missing:
+        return known
+
+    resolved: dict[str, str | None] = {}
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            for batch in origin.chunk(missing):
+                videos = await client.get(
+                    origin.VIDEOS_URL,
+                    params={"part": "snippet", "id": ",".join(batch), "key": api_key},
+                )
+                if videos.status_code != 200:
+                    continue
+                channel_of = origin.parse_channel_ids(videos.json())
+
+                channel_ids = list(dict.fromkeys(channel_of.values()))
+                country_of: dict[str, str | None] = {}
+                for channel_batch in origin.chunk(channel_ids):
+                    channels = await client.get(
+                        origin.CHANNELS_URL,
+                        params={
+                            "part": "snippet",
+                            "id": ",".join(channel_batch),
+                            "key": api_key,
+                        },
+                    )
+                    if channels.status_code == 200:
+                        country_of.update(origin.parse_countries(channels.json()))
+
+                for video_id in batch:
+                    resolved[video_id] = country_of.get(channel_of.get(video_id, ""), None)
+    except httpx.HTTPError:
+        return known
+
+    store.mkdir(parents=True, exist_ok=True)
+    for video_id, country in resolved.items():
+        entry = store / f"{video_id}.json"
+        tmp = entry.with_name(entry.name + ".tmp")
+        tmp.write_text(json.dumps({"country": country}))
+        tmp.replace(entry)
+        if country:
+            known[video_id] = country
+    return known
+
+
+async def select_videos(
+    config: Config, video_ids: list[str], cache_dir: Path, api_key: str = ""
+) -> dict:
+    """Order the results so the wall shows things that move, from many places."""
+    if not video_ids:
+        return {"slots": [], "reserves": [], "relaxed": 0}
+
+    # Diversity first, motion second: motion.rank preserves the order it is
+    # given among the videos it keeps, so spreading countries here survives
+    # the static filter rather than being undone by it.
+    if config.filtering.prefer_country_diversity and api_key:
+        countries = await video_countries(video_ids, cache_dir, api_key)
+        video_ids = origin.diversify([(v, countries.get(v)) for v in video_ids])
+
+    if not config.filtering.skip_static:
         cells = config.grid.cells
         return {"slots": video_ids[:cells], "reserves": video_ids[cells:], "relaxed": 0}
 
@@ -178,7 +268,7 @@ def create_app(
         except youtube.SearchError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         video_ids = [item["video_id"] for item in resolved["items"]]
-        selection = await select_videos(config, video_ids, cache_dir)
+        selection = await select_videos(config, video_ids, cache_dir, settings.youtube_api_key)
         message = videos_message(config, resolved, query, cache_dir, selection)
 
         querylog.append(

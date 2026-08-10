@@ -19,6 +19,7 @@ const muteButton = document.getElementById("mute");
 const newQueryButton = document.getElementById("new-query");
 const followCheckbox = document.getElementById("follow");
 const promptInput = document.getElementById("prompt");
+const hoverUnmuteCheckbox = document.getElementById("hover-unmute");
 const menuEl = document.getElementById("menu");
 
 let config = null;
@@ -57,10 +58,35 @@ function livePlayers() {
 // not silently undo what the user just clicked.
 let muted = true;
 
-function applyMuteState(player) {
+// Index of the cell the cursor is over while hover-to-unmute is on, or null.
+// It overrides the global mute state for that one player only.
+let audibleIndex = null;
+
+function applyMuteState(player, index = null) {
   if (!player?.mute) return;
+  if (hoverUnmuteCheckbox?.checked && audibleIndex !== null) {
+    // Exactly one cell is audible: the one under the cursor, regardless of
+    // what the global mute button says.
+    if (index !== null && index === audibleIndex) player.unMute();
+    else player.mute();
+    return;
+  }
   if (muted) player.mute();
   else player.unMute();
+}
+
+function applyMuteStateToAll() {
+  players.forEach((player, index) => applyMuteState(player, index));
+}
+
+function setAudibleCell(index) {
+  if (audibleIndex === index) return;
+  audibleIndex = index;
+  for (const cell of gridEl.children) delete cell.dataset.audible;
+  if (index !== null && gridEl.children[index]) {
+    gridEl.children[index].dataset.audible = "true";
+  }
+  applyMuteStateToAll();
 }
 
 function refreshMuteButton() {
@@ -220,7 +246,7 @@ function makePlayer({ mount, videoId }, index) {
     },
     events: {
       onReady: (event) => {
-        applyMuteState(event.target);
+        applyMuteState(event.target, index);
         suppressCaptions(event.target);
         // The iframe only exists once the player is ready, so this is the
         // earliest point the crop can be applied. Ask the player for its own
@@ -291,6 +317,7 @@ function rebuild() {
   if (!apiReady || !config || !haveVideos) return;
   // Every index the open menu is holding is about to become meaningless.
   closeMenu();
+  audibleIndex = null;
   // Hide before the new cells exist, not after: the flag must already be set
   // by the time anything can paint.
   gridEl.dataset.preroll = "true";
@@ -327,7 +354,7 @@ function refreshControls() {
  * running for seconds. Each one here plays for as little time as it takes to
  * buffer, then parks.
  */
-async function prerollOne(player, token, deadline) {
+async function prerollOne(player, index, token, deadline) {
   const alive = () => generation === token && Date.now() < deadline;
   const read = (fn, fallback) => {
     try {
@@ -377,7 +404,7 @@ async function prerollOne(player, token, deadline) {
     read(() => player.pauseVideo());
   }
 
-  read(() => applyMuteState(player));
+  read(() => applyMuteState(player, index));
 }
 
 async function prerollCurrentSet(token) {
@@ -391,7 +418,11 @@ async function prerollCurrentSet(token) {
 
   setStatus(`${statusPrefix} · pre-rolling…`, "busy");
   const deadline = Date.now() + PREROLL_TIMEOUT_MS;
-  await Promise.all(set.map((player) => prerollOne(player, token, deadline)));
+  await Promise.all(
+    players.map((player, index) =>
+      player ? prerollOne(player, index, token, deadline) : null,
+    ),
+  );
   if (generation !== token) return;
 
   finishPreroll(token);
@@ -738,7 +769,30 @@ muteButton.addEventListener("click", () => {
   refreshMuteButton();
   // Unmuting eight players at once is only permitted off a user gesture --
   // this click is it. Doing it any other way leaves some players silent.
-  for (const player of players) applyMuteState(player);
+  applyMuteStateToAll();
+});
+
+// Hover to unmute: point at a cell to hear only that one. The iframe has
+// pointer-events:none, so the cell itself receives the hover -- the same CSS
+// the context menu depends on.
+hoverUnmuteCheckbox.addEventListener("change", () => {
+  // Leaving the mode must not strand a cell audible or the whole wall silent.
+  setAudibleCell(null);
+  applyMuteStateToAll();
+});
+
+gridEl.addEventListener("pointerover", (event) => {
+  if (!hoverUnmuteCheckbox.checked) return;
+  const cell = event.target.closest(".cell");
+  if (!cell || cell.dataset.empty === "true") return;
+  setAudibleCell([...gridEl.children].indexOf(cell));
+});
+
+// pointerleave on the grid, not per cell: moving between adjacent cells would
+// otherwise blip the audio off and on again between them.
+gridEl.addEventListener("pointerleave", () => {
+  if (!hoverUnmuteCheckbox.checked) return;
+  setAudibleCell(null);
 });
 
 refreshMuteButton();

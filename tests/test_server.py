@@ -855,3 +855,97 @@ def test_the_log_accumulates_across_restarts(logging_env, monkeypatch):
         client.get("/api/videos")
 
     assert len(querylog.read_all(log_dir)) == 2, "the log must not be truncated on restart"
+
+
+# --- country diversity -----------------------------------------------------
+
+
+def stub_countries(monkeypatch, mapping):
+    async def fake(video_ids, cache_dir, api_key):
+        return {v: c for v, c in mapping.items() if c}
+
+    monkeypatch.setattr(server, "video_countries", fake)
+
+
+def test_the_wall_spreads_across_countries(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"prefer_country_diversity": True}})
+    )
+    # The first ten results all come from one country, as really happens.
+    mapping = {v: "US" for v in ids[:10]}
+    mapping.update({ids[10]: "KR", ids[11]: "GB", ids[12]: "ES", ids[13]: "AU"})
+    stub_countries(monkeypatch, mapping)
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    on_wall = [mapping.get(v) for v in body["video_ids"]]
+    assert len({c for c in on_wall if c}) >= 5, on_wall
+
+
+def test_diversity_keeps_the_most_relevant_result_first(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"prefer_country_diversity": True}})
+    )
+    stub_countries(monkeypatch, {v: "US" for v in ids[:5]} | {ids[5]: "KR"})
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert body["video_ids"][0] == ids[0], "reordering must not demote the top hit"
+
+
+def test_diversity_drops_nothing(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"prefer_country_diversity": True}})
+    )
+    stub_countries(monkeypatch, {v: "US" for v in ids})
+
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert sorted(body["video_ids"] + body["reserves"]) == sorted(ids)
+
+
+def test_diversity_can_be_turned_off(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"prefer_country_diversity": False}})
+    )
+    called = []
+
+    async def should_not_run(video_ids, cache_dir, api_key):
+        called.append(1)
+        return {}
+
+    monkeypatch.setattr(server, "video_countries", should_not_run)
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert called == [], "country lookup must not spend units when disabled"
+    assert body["video_ids"] == ids[:8]
+
+
+def test_a_country_lookup_failure_does_not_break_the_wall(app_env, monkeypatch):
+    app, config_path, cache_dir = app_env
+    ids = seed_cache(cache_dir)
+    config_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"prefer_country_diversity": True}})
+    )
+
+    async def unavailable(video_ids, cache_dir, api_key):
+        return {}  # everything unknown
+
+    monkeypatch.setattr(server, "video_countries", unavailable)
+    with TestClient(app) as client:
+        body = client.get("/api/videos").json()
+
+    assert len(body["video_ids"]) == 8
+    assert body["video_ids"] == ids[:8], "unknown origin should leave order alone"

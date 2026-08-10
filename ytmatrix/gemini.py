@@ -41,6 +41,15 @@ a wall. "NewJeans Ditto dance cover" is a better query than "kpop dance".
 obscure b-side by an unknown act, or a named individual covering a named song.
 - Vary what you name. Do not return to the same artist or song repeatedly.
 - Do not repeat or trivially reword any query in the avoid list.
+
+CRITICAL. If the theme or the operator asks for covers, EVERY query you \
+produce must contain a word that forces covers -- cover, dance cover, dance \
+practice, busking, acoustic version, reinterpretation, remix, fan cam of a \
+cover. Naming an artist and a song WITHOUT such a word returns that act's own \
+official upload: one canonical video and its algorithmic neighbours, which is \
+the opposite of a wall of different people. "BTS Dynamite" is wrong. \
+"BTS Dynamite dance cover" is right. Whatever constraint the theme carries -- \
+covers, live, a place, an instrument -- must survive into the query itself.
 """
 
 # A hard ceiling on how much history goes into the prompt. Without it the

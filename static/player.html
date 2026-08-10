@@ -29,7 +29,13 @@
     display: flex; align-items: center; gap: 6px;
     color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
   }
-  #follow-label input { cursor: pointer; }
+  #follow-label input, #hover-label input { cursor: pointer; }
+  #hover-label {
+    display: flex; align-items: center; gap: 6px;
+    color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
+  }
+  /* The cell the cursor is over while hover-unmute is on. */
+  .cell[data-audible="true"] { outline: 2px solid #d8a657; outline-offset: -2px; }
   #prompt {
     font: inherit; padding: 7px 11px; border-radius: 6px; min-width: 230px;
     border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
@@ -93,6 +99,9 @@
            title="A metaprompt: Gemini turns this into a search query using the app's guidance. Costs 100 quota units.">
     <label id="follow-label" title="When off, a new query loads paused and waits for you.">
       <input type="checkbox" id="follow"> follow play state
+    </label>
+    <label id="hover-label" title="Point at a cell to hear only that one.">
+      <input type="checkbox" id="hover-unmute"> hover to unmute
     </label>
     <span id="status">loading…</span>
     <a href="/config">config →</a>

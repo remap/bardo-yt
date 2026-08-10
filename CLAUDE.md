@@ -35,6 +35,7 @@ directory as a module on Node 23 and fails.
 | `ytmatrix/letterbox.py` | Finds the picture inside a boxed 16:9 frame, from the video's thumbnail. |
 | `ytmatrix/motion.py` | Scores real video vs. still-image-with-audio from storyboard frames; ranks the wall. |
 | `ytmatrix/querylog.py` | Append-only JSONL record of every query and its results, local-time stamped. |
+| `ytmatrix/origin.py` | Country-of-origin lookup + round-robin reorder so the wall spans places. |
 | `ytmatrix/server.py` | FastAPI routes, WS fan-out, and the cache-first `resolve_videos` that wires the three above. |
 | `ytmatrix/settings.py` | Env/secrets. `YOUTUBE_API_KEY` lives here, never in `config.yaml`. |
 | `ytmatrix/certs.py` | Self-signed cert generation (copied from layout-driver). |
@@ -122,6 +123,23 @@ directory as a module on Node 23 and fails.
     `&#39;`. `youtube.py` runs `html.unescape` once at the boundary so nothing
     downstream has to know. Do not escape them again on the way out; the
     context menu and the log both use `textContent`/JSON, not innerHTML.
+
+24. **Country of origin is not in `search.list`.** It takes `videos.list`
+    (→ channelId) then `channels.list` (→ `snippet.country`), both batched 50
+    ids per request at 1 unit each — 2 units against the search's 100, cached
+    per video forever. Coverage is ~60%, so `origin.diversify` **reorders and
+    never drops**: unknown origin is *one* bucket taking its turn, not one
+    bucket per video, or the 40% unknown would crowd out the known.
+
+    Order of operations matters: diversify runs **before** `motion.rank`,
+    because rank preserves the order it is given among the videos it keeps.
+    Reversing them would let the static filter undo the spread.
+
+25. **Whatever the theme constrains must survive into the query.** Naming an
+    artist and song without a cover word returns that act's own official
+    upload — one canonical video and its neighbours, the opposite of a wall.
+    The system prompt enforces this explicitly; do not soften it while
+    "relaxing" the specificity rules.
 
 23. **The prompt box is a metaprompt, not a query.** It is passed to Gemini as
     `instruction` alongside the standing theme and all the usual rules, so the
