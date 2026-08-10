@@ -37,9 +37,9 @@ Two pages:
   cell at once. It starts muted because browsers only autoplay muted video;
   the button supplies the user gesture that unmuting requires.
   **hover to unmute** makes exactly one cell audible — whichever the cursor is
-  over — and outlines it. Leaving the grid restores the global state. Same
-  trick as the context menu: `pointer-events: none` on the iframe means the
-  cell, not YouTube, receives the pointer.
+  over. Leaving the grid restores the global state. Same trick as the context
+  menu: `pointer-events: none` on the iframe means the cell, not YouTube,
+  receives the pointer.
 - **`/config`** — live editor. Saving pushes to the wall over a WebSocket.
 
 ## Authentication
@@ -120,8 +120,8 @@ right-click. The menu offers:
 
 Point at a cell and use the wheel. Zoom is **anchored on the cursor** — the
 pixel under the pointer stays under it — and is per cell, so you can crop into
-one performer while the rest of the wall sits at its normal framing. A zoomed
-cell is marked with a ⌕, and **Reset zoom** in its right-click menu clears it.
+one performer while the rest of the wall sits at its normal framing.
+**Reset zoom** in a cell's right-click menu clears it.
 
 Cover is where a cell *starts*, not the limit in either direction. Zooming out
 pulls back until the whole 16:9 frame is visible inside the cell and stops

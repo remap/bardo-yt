@@ -4,7 +4,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from ytmatrix.config import Config, load_config, save_config
+from ytmatrix.config import MAX_SEARCH_RESULTS, Config, load_config, save_config
 
 VALID = {
     "query": "golden cover",
@@ -31,10 +31,17 @@ def write_yaml(tmp_path: Path, data: dict) -> Path:
     return path
 
 
-def test_loads_the_committed_default_config():
+def test_the_committed_config_is_valid():
+    """config.yaml is committed but also rewritten at runtime by /config.
+
+    So this asserts it still parses and is coherent, not that it holds any
+    particular grid or query -- those are the operator's, and pinning them
+    here just breaks the suite every time someone resizes the wall.
+    """
     config = load_config(Path("config.yaml"))
-    assert config.query == "golden cover"
-    assert config.grid.cells == 8
+    assert config.query
+    assert config.grid.cells >= 1
+    assert config.grid.cells <= MAX_SEARCH_RESULTS
 
 
 def test_round_trips_through_yaml(tmp_path):
