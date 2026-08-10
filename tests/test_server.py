@@ -1,12 +1,13 @@
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, youtube
+from ytmatrix import budget, cache, gemini, letterbox, youtube
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
 
@@ -446,6 +447,176 @@ def test_editing_the_query_by_hand_overrides_a_generated_one(generating_env, mon
         assert client.get("/api/videos").json()["query"] == "generated thing"
         client.put("/api/config", json={**GENERATING, "query": "typed by hand"})
         assert client.get("/api/videos").json()["query"] == "typed by hand"
+
+
+def test_the_generated_query_survives_a_server_restart(generating_env, monkeypatch):
+    app, config_path, cache_dir = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        return "persisted query"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+
+    # A fresh app over the same cache dir is what a restart looks like.
+    restarted = create_app(
+        config_path=config_path,
+        cache_dir=cache_dir,
+        settings=Settings(youtube_api_key="TEST_KEY", gemini_api_key="GEMINI_KEY"),
+    )
+    with TestClient(restarted) as client:
+        assert client.get("/api/videos").json()["query"] == "persisted query"
+
+
+def test_a_restart_does_not_spend_quota_to_show_the_same_wall(generating_env, monkeypatch):
+    app, config_path, cache_dir = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        return "persisted query"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+    spent_after_generation = budget.spent(cache_dir)
+
+    restarted = create_app(
+        config_path=config_path,
+        cache_dir=cache_dir,
+        settings=Settings(youtube_api_key="TEST_KEY", gemini_api_key="GEMINI_KEY"),
+    )
+    with TestClient(restarted) as client:
+        client.get("/api/videos")
+        client.get("/api/videos")
+
+    assert budget.spent(cache_dir) == spent_after_generation, "reloads must be free"
+
+
+def test_history_survives_a_restart_so_gemini_keeps_avoiding_old_queries(
+    generating_env, monkeypatch
+):
+    app, config_path, cache_dir = generating_env
+    stub_search(monkeypatch)
+    seen = []
+    counter = iter(range(100))
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, client=None):
+        seen.append(list(avoid))
+        return f"query {next(counter)}"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        client.post("/api/new-query")
+
+    restarted = create_app(
+        config_path=config_path,
+        cache_dir=cache_dir,
+        settings=Settings(youtube_api_key="TEST_KEY", gemini_api_key="GEMINI_KEY"),
+    )
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(restarted) as client:
+        client.post("/api/new-query")
+
+    assert seen[1] == ["query 0"], "the restarted server forgot what it had already used"
+
+
+def pillarboxed_jpeg() -> bytes:
+    import io
+
+    from PIL import Image
+
+    image = Image.new("L", (320, 180), 0)
+    image.paste(Image.new("L", (102, 180), 200), (109, 0))
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
+def test_content_box_detects_bars_from_the_thumbnail(app_env, monkeypatch):
+    app, _, _ = app_env
+    thumbnail = pillarboxed_jpeg()
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            assert "i.ytimg.com" in url, "thumbnails must not come from the Data API"
+            assert "mqdefault" in url, "hqdefault is 4:3 with baked padding"
+            return httpx.Response(200, content=thumbnail)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    with TestClient(app) as client:
+        box = client.get("/api/content-box/abc123").json()
+    assert box["w"] < 0.4, box
+    assert box["h"] > 0.95, box
+
+
+def test_content_box_is_cached_so_a_video_is_only_analysed_once(app_env, monkeypatch):
+    app, _, _ = app_env
+    thumbnail = pillarboxed_jpeg()
+    fetches = []
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            fetches.append(url)
+            return httpx.Response(200, content=thumbnail)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    with TestClient(app) as client:
+        first = client.get("/api/content-box/abc123").json()
+        second = client.get("/api/content-box/abc123").json()
+    assert first == second
+    assert len(fetches) == 1
+
+
+def test_a_missing_thumbnail_falls_back_to_the_full_frame(app_env, monkeypatch):
+    app, _, _ = app_env
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            return httpx.Response(404)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    with TestClient(app) as client:
+        assert client.get("/api/content-box/gone").json() == letterbox.FULL_FRAME
+
+
+def test_a_thumbnail_fetch_failure_does_not_break_the_cell(app_env, monkeypatch):
+    app, _, _ = app_env
+
+    class FakeClient:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def get(self, url):
+            raise httpx.ConnectError("no network")
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: FakeClient())
+    with TestClient(app) as client:
+        response = client.get("/api/content-box/abc123")
+    assert response.status_code == 200
+    assert response.json() == letterbox.FULL_FRAME
 
 
 def test_settings_require_an_api_key(monkeypatch):

@@ -30,7 +30,9 @@ directory as a module on Node 23 and fails.
 | `ytmatrix/youtube.py` | `build_params` + `search` against the REST API. Knows nothing about config files or disk. |
 | `ytmatrix/cache.py` | Content-addressed on-disk cache. Knows nothing about YouTube. |
 | `ytmatrix/gemini.py` | Invents a search query from a theme plus an avoid-list. Knows nothing but Gemini. |
-| `ytmatrix/budget.py` | Daily quota ledger in `cache/_budget.json`; resets on date change. |
+| `ytmatrix/budget.py` | Daily quota ledger in `cache/_budget.json`; resets on Pacific date change. Local estimate, not a real reading. |
+| `ytmatrix/wallstate.py` | Persists the current query + history so reloads and restarts cost nothing. |
+| `ytmatrix/letterbox.py` | Finds the picture inside a boxed 16:9 frame, from the video's thumbnail. |
 | `ytmatrix/server.py` | FastAPI routes, WS fan-out, and the cache-first `resolve_videos` that wires the three above. |
 | `ytmatrix/settings.py` | Env/secrets. `YOUTUBE_API_KEY` lives here, never in `config.yaml`. |
 | `ytmatrix/certs.py` | Self-signed cert generation (copied from layout-driver). |
@@ -53,15 +55,23 @@ directory as a module on Node 23 and fails.
    is 100 searches. Resolution is cache-first and the cache key deliberately
    excludes the API key.
 
-   `query_generation.enabled` deliberately breaks the cache: a Gemini-invented
-   query is a cache miss by construction, so **every page load costs 100
-   units**. That is the feature working as asked, and it is why
-   `ytmatrix/budget.py` and `quota.daily_limit_units` exist. Two rules follow:
-   the budget is checked *before* spending, and generation happens **once per
-   page load, not per WebSocket reconnect** — a reconnect is a network hiccup,
-   and regenerating on one would drain the day every time the wifi blinks.
-   `generatedThisPageLoad` in `player.js` is what enforces that; do not move
-   the generation call into `resync()` unconditionally.
+   A Gemini-invented query is a cache miss by construction, so **generation
+   costs 100 units every time**. It therefore never happens implicitly: only
+   the New query button or `?new=true` triggers it, `?new=true` is stripped
+   from the URL the moment it is used, and the current query is persisted in
+   `cache/_wall.json` so reloads and restarts are free. Do not add generation
+   to page load, a timer, or `resync()` — `resync()` also runs on every
+   WebSocket reconnect, which is a network hiccup, not an intent.
+
+   **The budget counter is an estimate, not a reading.** Google exposes no
+   remaining-quota field on the YouTube Data API, and an API key cannot reach
+   the Cloud quota APIs. `budget.py` assumes 100 units/search (documented) and
+   counts only this app's own searches — it is blind to anything else sharing
+   the project or key, and clearing `cache/` zeroes it. Ground truth is the
+   403 `quotaExceeded`, handled separately. Do not present this number as
+   authoritative. Reading real quota needs the Service Usage or Monitoring
+   API with OAuth or a service account — note a service account *does* work
+   there, unlike for the YouTube Data API (gotcha 1).
 
 3. **Cost is per call, not per result** — so `maxResults` is always 50. Do not
    "optimize" it down to the grid size; that saves nothing and destroys the
@@ -143,6 +153,14 @@ directory as a module on Node 23 and fails.
     in JS yields `undefined`, `splitSlots` builds zero slots, and the wall goes
     blank — again with no error. JS derives the count via `cellCount(grid)` in
     `grid-logic.js`. Same class of bug as #12 and it hid behind it.
+
+15. **Thumbnail choice decides whether letterbox detection works at all.**
+    `mqdefault.jpg` (320×180) and `maxresdefault.jpg` (1280×720) are true 16:9
+    — the same frame the player renders. **`hqdefault.jpg` is 4:3 with its own
+    padding baked in** and will report letterboxing on every video ever made.
+    Detection also refuses to crop below `MIN_CONTENT_FRACTION` (30%), so a
+    dark or fading shot degrades to "no crop" instead of a 10× zoom into one
+    lit corner. Thumbnails come from `i.ytimg.com` and cost no quota.
 
 14. **Browser bugs need a browser test.** #12 and #13 were both invisible to
     the Python suite and the node tests — one is script-ordering, the other a

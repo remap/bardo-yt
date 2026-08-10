@@ -59,22 +59,57 @@ reserve pool and swapped in when an embed fails at play time.
 
 ## Generated queries
 
-With `query_generation.enabled`, Gemini invents a fresh search query on every
-page load, seeded by `theme` and steered away from the last `avoid_repeats`
-queries so it doesn't circle back to one you already paid for. Needs
-`GEMINI_API_KEY`.
+With `query_generation.enabled`, Gemini invents a search query seeded by
+`theme` and steered away from the last `avoid_repeats` queries so it doesn't
+circle back to one you already paid for. Needs `GEMINI_API_KEY`.
 
-**This deliberately defeats the cache.** A newly invented query has never been
-searched, so every reload spends 100 units — about 50 reloads against the
-default `quota.daily_limit_units: 5000`, and 100 against Google's real ceiling.
-The header shows the running total (`200/5000 units today`) so it is never a
-surprise.
+**Generating never happens implicitly**, because each new query is a cache miss
+by construction and costs 100 units. It takes an explicit act:
+
+- the **New query** button, or
+- loading `/?new=true` (the parameter is stripped from the URL immediately, so
+  a stray refresh or a restored tab can't spend another 100 units)
+
+Everything else is free. The current query is persisted to `cache/_wall.json`,
+so a plain reload — or a server restart — restores the same wall at zero cost.
 
 `ytmatrix/budget.py` tracks the day's spend in `cache/_budget.json` and refuses
 to search past the limit, falling back to stale cache when it can rather than
 going blank. Raise `quota.daily_limit_units`, or set it to `0`, to lift the
-guard. Typing a query by hand on `/config` overrides the generated one until
-the next reload.
+guard. Typing a query by hand on `/config` overrides the generated one.
+
+### The counter is an estimate, not a reading
+
+**Nothing here retrieves your real quota.** Google exposes no
+remaining-quota field on the YouTube Data API, and an API key cannot read the
+Cloud quota APIs. So the header's `900/5000` is this app's own tally: it
+assumes the documented 100 units per `search.list` and counts the searches it
+performed. It does **not** see usage from anything else sharing the project or
+key, and clearing `cache/` resets it to zero.
+
+The ground truth is Google's own 403 `quotaExceeded`, which is handled
+separately and independently of this counter. For an authoritative number, read
+the Cloud console (**APIs & Services → Quotas**), or wire up the Service Usage
+API — that one *does* accept a service account, unlike the YouTube Data API.
+
+## Letterbox detection
+
+YouTube renders every video into a 16:9 player, so vertically-shot and
+ultrawide sources arrive with black bars baked into the frame; cropping the
+iframe doesn't help, because the bars scale with it. The iframe is
+cross-origin, so its pixels can't be read — but the video's `mqdefault`
+thumbnail is the same 16:9 frame, so bars there mean bars on screen.
+
+`ytmatrix/letterbox.py` finds the picture's bounds in that thumbnail and
+`coverRect()` oversizes the iframe until the *content* covers the cell, pushing
+the bars outside the crop. Detections are cached per video and cost no quota:
+`i.ytimg.com` is not the Data API.
+
+It refuses to crop when the result would be implausible (below 30% of the
+frame), so a night scene or a fade-to-black shows uncropped rather than zooming
+10× into one lit window. Use `mqdefault` or `maxresdefault`, never `hqdefault`
+— that one is 4:3 with padding of its own and reports letterboxing on
+everything.
 
 ## Tests
 

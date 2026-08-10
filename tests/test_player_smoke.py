@@ -262,6 +262,60 @@ def test_player_chrome_is_suppressed_as_far_as_the_api_allows(running_server):
         browser.close()
 
 
+def test_a_detected_content_box_zooms_further_than_plain_cover_fit(running_server):
+    """Where black bars are detected, the crop must push past them.
+
+    Stated as an invariant rather than against one hand-picked video: whether
+    any particular video is pillarboxed is not this code's business, and
+    pinning a specific id would make the test rot when that video changes.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
+        )
+        page.wait_for_timeout(4000)  # let the content-box fetches land
+
+        report = page.evaluate("""
+            [...document.querySelectorAll('.cell')].map(cell => {
+                const f = cell.querySelector('iframe');
+                const c = cell.getBoundingClientRect();
+                const plainWidth = Math.max(c.width, (16 * c.height) / 9);
+                return {
+                    id: cell.dataset.videoId,
+                    width: f.getBoundingClientRect().width,
+                    plainWidth,
+                    cellW: c.width,
+                    cellH: c.height,
+                };
+            })
+        """)
+
+        import httpx as _httpx
+
+        checked = 0
+        for cell in report:
+            box = _httpx.get(
+                f"{running_server}api/content-box/{cell['id']}", verify=False, timeout=20
+            ).json()
+            cropped = box["w"] < 0.98 or box["h"] < 0.98
+            if not cropped:
+                # No bars detected: geometry must equal plain cover-fit.
+                assert cell["width"] == pytest.approx(cell["plainWidth"], rel=0.02), cell
+                continue
+            checked += 1
+            assert cell["width"] > cell["plainWidth"] * 1.001, (
+                f"bars detected ({box}) but no extra zoom applied: {cell}"
+            )
+            # And the content region must still cover the cell.
+            assert box["w"] * cell["width"] >= cell["cellW"] - 1, cell
+
+        print(f"\n  {checked}/8 cells had detectable bars and were zoomed past them")
+        browser.close()
+
+
 def test_every_iframe_covers_its_cell_with_no_letterboxing(running_server):
     """The iframe must fill the cell in both axes, cropped and centred.
 

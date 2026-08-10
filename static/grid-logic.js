@@ -36,15 +36,28 @@ export function substituteFailedSlot(state, cellIndex) {
 export const VIDEO_ASPECT_W = 16;
 export const VIDEO_ASPECT_H = 9;
 
-export function coverRect(cellWidth, cellHeight) {
-  const scale = Math.max(cellWidth / VIDEO_ASPECT_W, cellHeight / VIDEO_ASPECT_H);
-  const width = VIDEO_ASPECT_W * scale;
-  const height = VIDEO_ASPECT_H * scale;
+export const FULL_FRAME = { x: 0, y: 0, w: 1, h: 1 };
+
+// `content` is where the real picture sits inside the player's 16:9 frame,
+// normalised 0..1 -- a vertically-shot video arrives pillarboxed, so its
+// content is a narrow centre column. Oversize the iframe until that *content*
+// covers the cell, then offset so the content's centre lands on the cell's,
+// pushing the black bars outside the crop entirely.
+//
+// With the default full frame this reduces exactly to plain cover-fit.
+export function coverRect(cellWidth, cellHeight, content = FULL_FRAME) {
+  const w = content.w > 0 ? content.w : 1;
+  const h = content.h > 0 ? content.h : 1;
+
+  // Smallest 16:9 iframe whose content region still covers the cell.
+  const width = Math.max(cellWidth / w, (VIDEO_ASPECT_W * cellHeight) / (VIDEO_ASPECT_H * h));
+  const height = (width * VIDEO_ASPECT_H) / VIDEO_ASPECT_W;
+
   return {
     width,
     height,
-    left: (cellWidth - width) / 2,
-    top: (cellHeight - height) / 2,
+    left: cellWidth / 2 - (content.x + w / 2) * width,
+    top: cellHeight / 2 - (content.y + h / 2) * height,
   };
 }
 

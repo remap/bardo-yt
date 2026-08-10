@@ -12,6 +12,7 @@ const statusEl = document.getElementById("status");
 const playButton = document.getElementById("play");
 const pauseButton = document.getElementById("pause");
 const muteButton = document.getElementById("mute");
+const newQueryButton = document.getElementById("new-query");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
@@ -63,12 +64,29 @@ const cellResizeObserver = new ResizeObserver((entries) => {
   for (const entry of entries) applyCoverFit(entry.target);
 });
 
+// Where the real picture sits inside each video's 16:9 frame, keyed by video
+// id. Populated asynchronously; until it arrives a cell simply uses plain
+// cover-fit, which is what it did before this existed.
+const contentBoxes = new Map();
+
+async function loadContentBox(videoId, cell) {
+  if (!videoId || contentBoxes.has(videoId)) return;
+  try {
+    const response = await fetch(`/api/content-box/${encodeURIComponent(videoId)}`);
+    if (!response.ok) return;
+    contentBoxes.set(videoId, await response.json());
+    applyCoverFit(cell);
+  } catch {
+    // No box means no extra zoom -- the cell still fills, just with bars.
+  }
+}
+
 function applyCoverFit(cell) {
   const iframe = cell?.querySelector("iframe");
   if (!iframe) return;
   const { width, height } = cell.getBoundingClientRect();
   if (!width || !height) return;
-  const rect = coverRect(width, height);
+  const rect = coverRect(width, height, contentBoxes.get(cell.dataset.videoId));
   iframe.style.width = `${rect.width}px`;
   iframe.style.height = `${rect.height}px`;
   iframe.style.left = `${rect.left}px`;
@@ -127,6 +145,7 @@ function buildCells() {
     const cell = document.createElement("div");
     cell.className = "cell";
     cell.dataset.empty = videoId ? "false" : "true";
+    if (videoId) cell.dataset.videoId = videoId;
     const mount = document.createElement("div");
     mount.id = `slot-${index}`;
     cell.appendChild(mount);
@@ -166,7 +185,10 @@ function makePlayer({ mount, videoId }, index) {
         // The iframe only exists once the player is ready, so this is the
         // earliest point the crop can be applied. Ask the player for its own
         // iframe: `mount` was replaced by it and is detached by now.
-        applyCoverFit(event.target.getIframe()?.closest(".cell"));
+        const cell = event.target.getIframe()?.closest(".cell");
+        applyCoverFit(cell);
+        // Detect this video's black bars and re-crop past them once known.
+        loadContentBox(cell?.dataset.videoId, cell);
         // Do not resurrect playback the user deliberately paused.
         if (hasPlayed && !paused && config.playback.autoplay_on_change) {
           event.target.playVideo();
@@ -200,6 +222,10 @@ function handlePlayerError(index) {
 
   const videoId = slotState.slots[index];
   cell.dataset.empty = videoId ? "false" : "true";
+  // The substitute is a different video with its own bars, so the cell must
+  // stop claiming the failed video's content box.
+  if (videoId) cell.dataset.videoId = videoId;
+  else delete cell.dataset.videoId;
   cell.replaceChildren();
   const mount = document.createElement("div");
   mount.id = `slot-${index}`;
@@ -248,11 +274,29 @@ function applyVideos(message) {
   rebuild();
 }
 
-// Generation happens once per page load. resync() also runs on every WebSocket
-// reconnect, and a reconnect is a network hiccup -- spending 100 units each
-// time the wifi blinks would drain the day's budget with nothing to show.
-let generatedThisPageLoad = false;
+// Generating costs 100 quota units, so it never happens implicitly. A plain
+// reload restores the persisted query for free; a new one takes an explicit
+// act -- the New query button, or ?new=true.
+let requestedNewThisPageLoad = false;
 let seededMuteFromConfig = false;
+
+async function requestNewQuery() {
+  newQueryButton.disabled = true;
+  setStatus("inventing a query…");
+  try {
+    const response = await fetch("/api/new-query", { method: "POST" });
+    if (response.ok) {
+      applyVideos(await response.json());
+      return true;
+    }
+    // A failed generation must leave the wall working, not blank.
+    const body = await response.json().catch(() => ({}));
+    setStatus(`query generation failed: ${body.detail ?? response.status}`, "error");
+    return false;
+  } finally {
+    newQueryButton.disabled = false;
+  }
+}
 
 async function resync() {
   config = await (await fetch("/api/config")).json();
@@ -264,18 +308,16 @@ async function resync() {
     refreshMuteButton();
   }
 
-  if (config.query_generation?.enabled && !generatedThisPageLoad) {
-    generatedThisPageLoad = true;
-    setStatus("inventing a query…");
-    const generated = await fetch("/api/new-query", { method: "POST" });
-    if (generated.ok) {
-      applyVideos(await generated.json());
-      return;
-    }
-    // Fall through to the existing query: a failed generation should leave the
-    // wall working, not blank.
-    const body = await generated.json().catch(() => ({}));
-    setStatus(`query generation failed: ${body.detail ?? generated.status}`, "error");
+  newQueryButton.hidden = !config.query_generation?.enabled;
+
+  const wantsNew = new URLSearchParams(window.location.search).get("new") === "true";
+  if (wantsNew && config.query_generation?.enabled && !requestedNewThisPageLoad) {
+    requestedNewThisPageLoad = true;
+    // Strip the parameter so a stray refresh -- or the browser restoring the
+    // tab -- does not silently spend another 100 units. Getting a new query
+    // should always be a thing you chose to do.
+    window.history.replaceState({}, "", window.location.pathname);
+    if (await requestNewQuery()) return;
   }
 
   const videosResponse = await fetch("/api/videos");
@@ -286,6 +328,8 @@ async function resync() {
   }
   applyVideos(await videosResponse.json());
 }
+
+newQueryButton.addEventListener("click", requestNewQuery);
 
 playButton.addEventListener("click", () => {
   hasPlayed = true;

@@ -54,6 +54,57 @@ test("coverRect handles a zero-sized cell without producing NaN", () => {
   for (const v of Object.values(r)) assert.ok(Number.isFinite(v), `${v} is not finite`);
 });
 
+// Pushing past detected black bars: the *content* must cover the cell, not the
+// 16:9 frame that contains it.
+
+const PILLARBOXED = { x: 0.34, y: 0, w: 0.32, h: 1 }; // a 9:16 video in a 16:9 frame
+
+test("coverRect zooms past pillarbox bars so content fills the cell", () => {
+  const cellW = 320;
+  const cellH = 180;
+  const r = coverRect(cellW, cellH, PILLARBOXED);
+  const contentW = PILLARBOXED.w * r.width;
+  const contentH = PILLARBOXED.h * r.height;
+  assert.ok(contentW >= cellW - 0.001, `content width ${contentW} < cell ${cellW}`);
+  assert.ok(contentH >= cellH - 0.001, `content height ${contentH} < cell ${cellH}`);
+});
+
+test("coverRect centres the content region, not the frame", () => {
+  const cellW = 320;
+  const cellH = 180;
+  const r = coverRect(cellW, cellH, PILLARBOXED);
+  const contentCentreX = r.left + (PILLARBOXED.x + PILLARBOXED.w / 2) * r.width;
+  const contentCentreY = r.top + (PILLARBOXED.y + PILLARBOXED.h / 2) * r.height;
+  assert.ok(Math.abs(contentCentreX - cellW / 2) < 0.001, contentCentreX);
+  assert.ok(Math.abs(contentCentreY - cellH / 2) < 0.001, contentCentreY);
+});
+
+test("coverRect pushes the bars outside the cell entirely", () => {
+  const r = coverRect(320, 180, PILLARBOXED);
+  // Left edge of the content must be at or left of the cell's left edge,
+  // meaning the bar beside it is off-screen.
+  const contentLeft = r.left + PILLARBOXED.x * r.width;
+  const contentRight = contentLeft + PILLARBOXED.w * r.width;
+  assert.ok(contentLeft <= 0.001, `bar visible on the left: ${contentLeft}`);
+  assert.ok(contentRight >= 320 - 0.001, `bar visible on the right: ${contentRight}`);
+});
+
+test("coverRect zooms past letterbox bars on an ultrawide source", () => {
+  const ultrawide = { x: 0, y: 0.13, w: 1, h: 0.74 };
+  const r = coverRect(400, 400, ultrawide);
+  assert.ok(ultrawide.w * r.width >= 400 - 0.001);
+  assert.ok(ultrawide.h * r.height >= 400 - 0.001);
+});
+
+test("coverRect with an explicit full frame equals the no-argument form", () => {
+  assert.deepEqual(coverRect(640, 360, { x: 0, y: 0, w: 1, h: 1 }), coverRect(640, 360));
+});
+
+test("coverRect survives a degenerate content box without NaN", () => {
+  const r = coverRect(320, 180, { x: 0, y: 0, w: 0, h: 0 });
+  for (const v of Object.values(r)) assert.ok(Number.isFinite(v), `${v} is not finite`);
+});
+
 // `cells` is a Python @property on the Grid model, so it is absent from the
 // serialized config. Reading config.grid.cells returned undefined, splitSlots
 // built zero slots, and the wall rendered blank with no error.

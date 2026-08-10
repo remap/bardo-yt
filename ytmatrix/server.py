@@ -1,13 +1,15 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
-from ytmatrix import budget, cache, gemini, youtube
+from ytmatrix import budget, cache, gemini, letterbox, wallstate, youtube
 from ytmatrix.config import Config, load_config, save_config
 from ytmatrix.settings import Settings
 from ytmatrix.ws import ConnectionManager
@@ -85,11 +87,12 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
     app = FastAPI(title="yt matrix")
     manager = ConnectionManager()
 
-    # The query actually on the wall. Gemini-generated queries live here rather
-    # than in config.yaml: writing every reload's query to a committed file
-    # would churn git constantly, and the file's `query` field stays meaningful
-    # as the manual fallback when generation is off.
-    state: dict = {"query": None, "history": []}
+    # The query actually on the wall, restored from disk so a restart or a
+    # reload keeps showing what it was showing -- reloads are free, and only an
+    # explicit "New" spends quota. Kept out of config.yaml: writing every
+    # generated query to a committed file would churn git constantly, and the
+    # file's `query` field stays meaningful as the manual fallback.
+    state: dict = wallstate.load(cache_dir)
 
     def effective_query(config: Config) -> str:
         return state["query"] or config.query
@@ -146,6 +149,7 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
         # last generated, or the config page would appear to do nothing.
         if previous.query != new_config.query:
             state["query"] = None
+            wallstate.save(cache_dir, state)
 
         await manager.broadcast({"type": "config", "config": new_config.model_dump(mode="json")})
 
@@ -182,6 +186,40 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
     @app.get("/api/videos")
     async def get_videos() -> dict:
         return await current_videos()
+
+    @app.get("/api/content-box/{video_id}")
+    async def content_box(video_id: str) -> dict:
+        """Where the actual picture sits inside this video's 16:9 frame.
+
+        Thumbnails come from i.ytimg.com, which is not the Data API and costs
+        no quota. Results are cached on disk: a video's shape never changes.
+        """
+        box_cache = cache_dir / "content-boxes"
+        cached = box_cache / f"{video_id}.json"
+        if cached.exists():
+            try:
+                return json.loads(cached.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass  # Re-fetch rather than fail.
+
+        url = letterbox.THUMBNAIL_URL.format(video_id=video_id)
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url)
+            box = (
+                letterbox.detect_content_box(response.content)
+                if response.status_code == 200
+                else dict(letterbox.FULL_FRAME)
+            )
+        except httpx.HTTPError:
+            # A missing thumbnail is not worth failing a cell over.
+            return dict(letterbox.FULL_FRAME)
+
+        box_cache.mkdir(parents=True, exist_ok=True)
+        tmp = cached.with_name(cached.name + ".tmp")
+        tmp.write_text(json.dumps(box))
+        tmp.replace(cached)
+        return box
 
     @app.post("/api/new-query")
     async def new_query() -> dict:
@@ -222,6 +260,7 @@ def create_app(config_path: Path, cache_dir: Path, settings: Settings) -> FastAP
 
         state["query"] = query
         state["history"].append(query)
+        wallstate.save(cache_dir, state)
         message = await current_videos()
         await manager.broadcast(message)
         return message
