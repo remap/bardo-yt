@@ -1,0 +1,10 @@
+.env
+cache/
+*.pem
+*.key
+__pycache__/
+*.py[cod]
+.venv/
+.DS_Store
+node_modules/
+runtime/
