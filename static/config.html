@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yt matrix — config</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px; background: #0b0b0d; color: #e8e8ea;
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  main { max-width: 560px; margin: 0 auto; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+       color: #8a8a94; margin: 28px 0 10px; font-weight: 600; }
+  label { display: grid; grid-template-columns: 160px 1fr; align-items: center;
+          gap: 12px; margin-bottom: 8px; }
+  input, select {
+    font: inherit; padding: 7px 10px; border-radius: 6px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea; width: 100%;
+  }
+  input[type="checkbox"] { width: auto; justify-self: start; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  #quota {
+    margin: 14px 0; padding: 9px 12px; border-radius: 6px; font-size: 13px;
+    border: 1px solid #2c3a2c; background: #141a14; color: #8fbf8f;
+  }
+  #quota[data-cost="100"] { border-color: #4a3a22; background: #1e180f; color: #d8a657; }
+  footer { display: flex; align-items: center; gap: 14px; margin-top: 24px; }
+  button {
+    font: inherit; font-weight: 600; padding: 9px 22px; border-radius: 6px;
+    border: 1px solid #3a3a42; background: #1c1c21; color: #e8e8ea; cursor: pointer;
+  }
+  button:hover { background: #26262d; }
+  #result { color: #8a8a94; }
+  #result[data-state="error"] { color: #e0685f; white-space: pre-wrap; }
+  #result[data-state="ok"] { color: #8fbf8f; }
+  a { color: #8a8a94; margin-left: auto; }
+</style>
+</head>
+<body>
+<main>
+  <h1>yt matrix — config</h1>
+
+  <h2>Search</h2>
+  <label>Query <input id="query" type="text"></label>
+  <label>Order
+    <select id="order">
+      <option>relevance</option><option>date</option><option>rating</option>
+      <option>viewCount</option><option>title</option>
+    </select>
+  </label>
+  <label>Duration
+    <select id="video_duration">
+      <option>any</option><option>short</option><option>medium</option><option>long</option>
+    </select>
+  </label>
+  <label>Safe search
+    <select id="safe_search">
+      <option>none</option><option>moderate</option><option>strict</option>
+    </select>
+  </label>
+  <label>Language <input id="relevance_language" type="text" placeholder="en (blank for any)"></label>
+
+  <div id="quota">checking…</div>
+
+  <h2>Grid</h2>
+  <div class="row">
+    <label>Columns <input id="cols" type="number" min="1" max="50"></label>
+    <label>Rows <input id="rows" type="number" min="1" max="50"></label>
+  </div>
+
+  <h2>Playback</h2>
+  <label>Start offset (s) <input id="start_offset" type="number" min="0"></label>
+  <label>Loop <input id="loop" type="checkbox"></label>
+  <label>Autoplay on change <input id="autoplay_on_change" type="checkbox"></label>
+
+  <footer>
+    <button id="save">Save</button>
+    <span id="result"></span>
+    <a href="/">← wall</a>
+  </footer>
+</main>
+<script type="module" src="/static/config.js"></script>
+</body>
+</html>

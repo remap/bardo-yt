@@ -1,0 +1,31 @@
+query: golden cover
+grid:
+  cols: 4
+  rows: 2
+search:
+  order: relevance
+  video_duration: short
+  safe_search: moderate
+  relevance_language: en
+  video_license: any
+playback:
+  muted: true
+  autoplay_on_change: false
+  start_offset: 0
+  loop: true
+cache:
+  ttl_hours: 24.0
+query_generation:
+  enabled: true
+  theme: 'K-pop covers: other people performing K-pop songs -- dance covers, dance
+    practice, busking, street and stage performances, acoustic and band reinterpretations.
+    Always covers, never the official artist upload.'
+  model: gemini-3.6-flash
+  avoid_repeats: 20
+filtering:
+  skip_static: true
+  prefer_country_diversity: true
+  static_threshold: 3.5
+  scan_depth: 24
+quota:
+  daily_limit_units: 5000
