@@ -12,18 +12,28 @@
     background: #0b0b0d; color: #e8e8ea;
     font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif;
   }
+  /* Enough controls now that the row must be allowed to give: nowrap on the
+     buttons, and the status text shrinks to an ellipsis rather than forcing
+     the header to grow into a column. */
   header {
-    display: flex; align-items: center; gap: 16px;
-    padding: 10px 16px; border-bottom: 1px solid #26262b; flex: none;
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; border-bottom: 1px solid #26262b; flex: none;
+    overflow: hidden;
   }
   button {
-    font: inherit; font-weight: 600; padding: 8px 20px; border-radius: 6px;
+    font: inherit; font-weight: 600; padding: 7px 13px; border-radius: 6px;
     border: 1px solid #3a3a42; background: #1c1c21; color: #e8e8ea; cursor: pointer;
+    white-space: nowrap; flex: none;
   }
   button:hover { background: #26262d; }
-  #status { color: #8a8a94; }
+  #status { color: #8a8a94; flex: 1 1 auto; min-width: 0;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #status[data-state="error"] { color: #e0685f; }
   #status[data-state="busy"] { color: #d8a657; }
+  #audio { color: #8a8a94; flex: 0 1 auto; max-width: 240px; overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+  #audio:empty { display: none; }
+  #audio[data-locked="true"] { color: #d8a657; }
   button:disabled { opacity: .45; cursor: default; }
   #follow-label {
     display: flex; align-items: center; gap: 6px;
@@ -40,6 +50,7 @@
   #prompt {
     font: inherit; padding: 7px 11px; border-radius: 6px; min-width: 230px;
     border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+    flex: 0 1 230px;
   }
   #prompt:focus { outline: none; border-color: #5a5a68; }
   #prompt:disabled { opacity: .5; }
@@ -61,7 +72,7 @@
   }
   #menu button:hover { background: #262630; }
   #menu button .hint { color: #6f6f7a; font-size: 11px; }
-  a { color: #8a8a94; margin-left: auto; }
+  a { color: #8a8a94; flex: none; white-space: nowrap; }
   #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
   /* Hidden while pre-rolling. Every cell has to play briefly to buffer, and
      without this you watch eight videos flicker on and stop again on every
@@ -96,6 +107,7 @@
     <button id="play">Play all</button>
     <button id="pause">Pause all</button>
     <button id="mute">Unmute all</button>
+    <button id="rewind" title="Send every cell back to the start.">Rewind all</button>
     <button id="shuffle" title="New videos from the same query. Costs no quota; a reload restores the ranked order.">
       Shuffle
     </button>
@@ -112,6 +124,7 @@
     <label id="hover-label" title="Point at a cell to hear only that one.">
       <input type="checkbox" id="hover-unmute"> hover to unmute
     </label>
+    <span id="audio"></span>
     <span id="status">loading…</span>
     <a href="/config">config →</a>
   </header>

@@ -37,7 +37,12 @@ Two pages:
   cell at once. It starts muted because browsers only autoplay muted video;
   the button supplies the user gesture that unmuting requires.
   **hover to unmute** makes exactly one cell audible — whichever the cursor is
-  over. Leaving the grid restores the global state. Same trick as the context
+  over. **Double-click** a cell to lock the audio there: it survives the cursor
+  leaving, double-clicking another cell moves it, and double-clicking the same
+  cell again turns it off. The header names whichever video you are hearing —
+  with eight playing, tracing a sound back to a cell by ear is hopeless.
+  Priority is lock, then hover, then the global mute button.
+  **Rewind all** sends every cell back to the start. Same trick as the context
   menu: `pointer-events: none` on the iframe means the cell, not YouTube,
   receives the pointer.
 - **`/config`** — live editor. Saving pushes to the wall over a WebSocket.

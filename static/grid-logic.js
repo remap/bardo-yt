@@ -210,6 +210,25 @@ export function zoomAt(
   return { zoom, offsetX: wantLeft - base.left, offsetY: wantTop - base.top };
 }
 
+// Which cell is allowed to make noise. Three sources of truth, in priority
+// order, kept here so the rule is one readable expression rather than nested
+// conditionals spread through the mute code.
+export const AUDIO_ALL = "all";
+export const AUDIO_NONE = "none";
+
+export function audioTarget({ locked = null, hovered = null, hoverEnabled = false, muted = true }) {
+  // A double-click lock is an explicit choice and outranks a passing cursor.
+  if (Number.isInteger(locked)) return locked;
+  if (hoverEnabled && Number.isInteger(hovered)) return hovered;
+  return muted ? AUDIO_NONE : AUDIO_ALL;
+}
+
+export function isAudible(index, target) {
+  if (target === AUDIO_ALL) return true;
+  if (target === AUDIO_NONE) return false;
+  return index === target;
+}
+
 // Looping by waiting for the ENDED event is what summons end-screen cards:
 // by the time YouTube fires it, the suggestion grid is already drawn over the
 // video. So restart just *before* the end instead and never let it finish.

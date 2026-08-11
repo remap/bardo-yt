@@ -12,6 +12,10 @@ import {
   zoomAt,
   panBy,
   shuffleSlots,
+  audioTarget,
+  isAudible,
+  AUDIO_ALL,
+  AUDIO_NONE,
   IDENTITY_VIEW,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
@@ -28,6 +32,8 @@ const hoverUnmuteCheckbox = document.getElementById("hover-unmute");
 const menuEl = document.getElementById("menu");
 const resetViewButton = document.getElementById("reset-view");
 const shuffleButton = document.getElementById("shuffle");
+const audioEl = document.getElementById("audio");
+const rewindButton = document.getElementById("rewind");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
@@ -65,25 +71,51 @@ function livePlayers() {
 // not silently undo what the user just clicked.
 let muted = true;
 
-// Index of the cell the cursor is over while hover-to-unmute is on, or null.
-// It overrides the global mute state for that one player only.
+// The cell the cursor is over while hover-to-unmute is on, or null.
 let audibleIndex = null;
+// The cell double-clicked to hold the audio. Outranks hover and the global
+// mute button, and survives the cursor leaving the grid entirely.
+let lockedIndex = null;
+
+function currentAudioTarget() {
+  return audioTarget({
+    locked: lockedIndex,
+    hovered: audibleIndex,
+    hoverEnabled: hoverUnmuteCheckbox?.checked ?? false,
+    muted,
+  });
+}
 
 function applyMuteState(player, index = null) {
   if (!player?.mute) return;
-  if (hoverUnmuteCheckbox?.checked && audibleIndex !== null) {
-    // Exactly one cell is audible: the one under the cursor, regardless of
-    // what the global mute button says.
-    if (index !== null && index === audibleIndex) player.unMute();
-    else player.mute();
-    return;
-  }
-  if (muted) player.mute();
-  else player.unMute();
+  if (isAudible(index, currentAudioTarget())) player.unMute();
+  else player.mute();
 }
 
 function applyMuteStateToAll() {
   players.forEach((player, index) => applyMuteState(player, index));
+  refreshAudioIndicator();
+}
+
+// Say out loud which video you are hearing -- with eight of them playing,
+// tracing a sound back to a cell by ear is hopeless.
+function refreshAudioIndicator() {
+  const target = currentAudioTarget();
+  if (target === AUDIO_NONE) {
+    audioEl.textContent = "";
+    delete audioEl.dataset.locked;
+    return;
+  }
+  if (target === AUDIO_ALL) {
+    audioEl.textContent = "audio: all cells";
+    delete audioEl.dataset.locked;
+    return;
+  }
+  const videoId = gridEl.children[target]?.dataset.videoId;
+  const name = titles.get(videoId) ?? videoId ?? `cell ${target + 1}`;
+  const locked = Number.isInteger(lockedIndex);
+  audioEl.textContent = `${locked ? "audio locked" : "audio"} · ${target + 1}. ${name}`;
+  audioEl.dataset.locked = String(locked);
 }
 
 function setAudibleCell(index) {
@@ -333,6 +365,7 @@ function rebuild() {
   // Every index the open menu is holding is about to become meaningless.
   closeMenu();
   audibleIndex = null;
+  lockedIndex = null;
   views.clear();
   // Hide before the new cells exist, not after: the flag must already be set
   // by the time anything can paint.
@@ -541,6 +574,7 @@ function applyVideos(message) {
     }${relaxed}${budgetText}`;
   setStatus(statusPrefix, message.note ? "error" : "");
   rebuild();
+  refreshAudioIndicator();
 }
 
 // Generating costs 100 quota units, so it never happens implicitly. A plain
@@ -700,8 +734,14 @@ function menuItems(cell) {
       run: () => (playing ? player?.pauseVideo?.() : player?.playVideo?.()),
     },
     {
-      label: isMuted ? "Unmute this cell" : "Mute this cell",
-      run: () => (isMuted ? player?.unMute?.() : player?.mute?.()),
+      label: lockedIndex === index ? "Unlock audio" : "Lock audio to this cell",
+      hint: "double-click",
+      run: () => {
+        lockedIndex = lockedIndex === index ? null : index;
+        for (const other of gridEl.children) delete other.dataset.locked;
+        if (lockedIndex !== null) cell.dataset.locked = "true";
+        applyMuteStateToAll();
+      },
     },
     {
       label: "Restart this cell",
@@ -788,6 +828,19 @@ window.addEventListener("resize", closeMenu);
 // has pre-rolled, so there is no window where pressing it starts only some.
 playButton.addEventListener("click", startAll);
 pauseButton.addEventListener("click", pauseAll);
+
+rewindButton.addEventListener("click", () => {
+  for (const player of livePlayers()) {
+    try {
+      player.seekTo(config.playback.start_offset, true);
+      // seekTo resumes a player that is not already paused, so a paused wall
+      // would quietly start playing. Put it back.
+      if (!wantPlaying) player.pauseVideo();
+    } catch {
+      // A player mid-teardown; skip it.
+    }
+  }
+});
 
 muteButton.addEventListener("click", () => {
   muted = !muted;
@@ -903,6 +956,20 @@ resetViewButton.addEventListener("click", () => {
     delete cell.dataset.zoomed;
     applyCoverFit(cell);
   }
+});
+
+// Double-click to hold the audio on one cell. Again on the same cell turns it
+// off; on a different cell it moves there. Unlike hover, this survives the
+// cursor leaving the grid -- which is the point of locking.
+gridEl.addEventListener("dblclick", (event) => {
+  const cell = event.target.closest(".cell");
+  if (!cell || cell.dataset.empty === "true") return;
+  const index = [...gridEl.children].indexOf(cell);
+  lockedIndex = lockedIndex === index ? null : index;
+
+  for (const other of gridEl.children) delete other.dataset.locked;
+  if (lockedIndex !== null) cell.dataset.locked = "true";
+  applyMuteStateToAll();
 });
 
 gridEl.addEventListener("pointerover", (event) => {

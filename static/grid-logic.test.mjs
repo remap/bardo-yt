@@ -17,6 +17,10 @@ import {
   minZoom,
   panBy,
   shuffleSlots,
+  audioTarget,
+  isAudible,
+  AUDIO_ALL,
+  AUDIO_NONE,
   rectFor,
   zoomAt,
   IDENTITY_VIEW,
@@ -652,4 +656,43 @@ test("shuffleSlots handles an empty pool", () => {
   const { slots, reserves } = shuffleSlots([], 8, seeded(5));
   assert.deepEqual(reserves, []);
   assert.equal(slots.filter(Boolean).length, 0);
+});
+
+// --- who gets to make noise ------------------------------------------------
+
+test("muted with nothing hovered or locked means silence", () => {
+  assert.equal(audioTarget({ muted: true }), AUDIO_NONE);
+});
+
+test("unmuted with nothing hovered or locked means the whole wall", () => {
+  assert.equal(audioTarget({ muted: false }), AUDIO_ALL);
+});
+
+test("hovering picks one cell when hover-unmute is on", () => {
+  assert.equal(audioTarget({ hovered: 3, hoverEnabled: true, muted: true }), 3);
+});
+
+test("hovering is ignored when hover-unmute is off", () => {
+  assert.equal(audioTarget({ hovered: 3, hoverEnabled: false, muted: true }), AUDIO_NONE);
+});
+
+test("a lock outranks a passing cursor", () => {
+  assert.equal(audioTarget({ locked: 5, hovered: 3, hoverEnabled: true, muted: true }), 5);
+});
+
+test("a lock outranks the global unmute too", () => {
+  assert.equal(audioTarget({ locked: 5, muted: false }), 5);
+});
+
+test("cell zero can be locked", () => {
+  // A plain truthiness check would treat index 0 as "no lock".
+  assert.equal(audioTarget({ locked: 0, muted: true }), 0);
+  assert.equal(audioTarget({ hovered: 0, hoverEnabled: true, muted: true }), 0);
+});
+
+test("isAudible follows the target", () => {
+  assert.equal(isAudible(2, 2), true);
+  assert.equal(isAudible(2, 3), false);
+  assert.equal(isAudible(2, AUDIO_ALL), true);
+  assert.equal(isAudible(2, AUDIO_NONE), false);
 });

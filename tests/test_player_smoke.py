@@ -837,9 +837,9 @@ def test_reset_view_clears_zoom_and_pan_on_every_cell(running_server):
         browser = p.chromium.launch()
         page = browser.new_context(ignore_https_errors=True).new_page()
         page.goto(running_server, wait_until="load")
-        page.wait_for_function(
-            "document.querySelectorAll('.cell iframe').length === 8", timeout=20_000
-        )
+        # Pre-roll re-crops every cell, so a baseline taken before it finishes
+        # is measured mid-layout -- widths narrower than the cell itself.
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
 
         geometry = """() => [...document.querySelectorAll('.cell')].map(c => {
             const b = c.getBoundingClientRect();
@@ -952,4 +952,160 @@ def test_reloading_reverts_to_the_ranked_order(running_server):
         page.reload(wait_until="load")
         page.wait_for_function("window.__prerolled === true", timeout=40_000)
         assert ids() == ranked, "a reload should restore the server's ranked order"
+        browser.close()
+
+
+def test_double_click_locks_audio_to_one_cell(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        assert page.evaluate("window.__players.every(p => p.isMuted())"), "starts muted"
+
+        page.locator(".cell").nth(4).dblclick()
+        page.wait_for_function(
+            "window.__players.filter(p => !p.isMuted()).length === 1", timeout=10_000
+        )
+        flags = page.evaluate("window.__players.map(p => p.isMuted())")
+        assert flags[4] is False, flags
+
+        # A lock outlives the cursor leaving -- that is what makes it a lock.
+        page.locator("#status").hover()
+        page.wait_for_timeout(800)
+        assert page.evaluate("window.__players[4].isMuted()") is False
+        browser.close()
+
+
+def test_double_clicking_another_cell_moves_the_lock(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        page.locator(".cell").nth(2).dblclick()
+        page.wait_for_function("window.__players[2].isMuted() === false", timeout=10_000)
+        page.locator(".cell").nth(6).dblclick()
+        page.wait_for_function("window.__players[6].isMuted() === false", timeout=10_000)
+
+        assert page.evaluate("window.__players[2].isMuted()") is True, "old lock not released"
+        assert page.evaluate("window.__players.filter(p => !p.isMuted()).length") == 1
+        browser.close()
+
+
+def test_double_clicking_the_same_cell_turns_the_lock_off(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        page.locator(".cell").nth(1).dblclick()
+        page.wait_for_function("window.__players[1].isMuted() === false", timeout=10_000)
+        page.locator(".cell").nth(1).dblclick()
+        # Back to the global state, which is muted.
+        page.wait_for_function("window.__players.every(p => p.isMuted())", timeout=10_000)
+        browser.close()
+
+
+def test_a_lock_outranks_hover(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        page.check("#hover-unmute")
+        page.locator(".cell").nth(3).dblclick()
+        page.wait_for_function("window.__players[3].isMuted() === false", timeout=10_000)
+
+        page.locator(".cell").nth(7).hover()
+        page.wait_for_timeout(800)
+        assert page.evaluate("window.__players[3].isMuted()") is False, "lock lost to hover"
+        assert page.evaluate("window.__players[7].isMuted()") is True
+        browser.close()
+
+
+def test_the_status_bar_names_the_audible_video(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(1500)
+
+        assert page.locator("#audio").text_content().strip() == "", "silent means say nothing"
+
+        page.locator(".cell").nth(5).dblclick()
+        page.wait_for_function("window.__players[5].isMuted() === false", timeout=10_000)
+
+        label = page.locator("#audio").text_content()
+        assert "locked" in label, label
+        assert "6." in label, f"should name the cell it is coming from: {label}"
+        video_id = page.evaluate("document.querySelectorAll('.cell')[5].dataset.videoId")
+        assert video_id in label, f"should name the video: {label}"
+
+        # Unmuting everything says so rather than naming one cell.
+        page.locator(".cell").nth(5).dblclick()
+        page.click("#mute")
+        page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=10_000)
+        assert "all cells" in page.locator("#audio").text_content()
+        browser.close()
+
+
+def test_rewind_all_sends_every_cell_back_to_the_start(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(6000)
+
+        before = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+        assert max(before) > 3, f"nothing played, so rewinding proves nothing: {before}"
+
+        page.click("#rewind")
+        page.wait_for_timeout(1200)
+        after = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+        assert all(t < 3 for t in after), f"not rewound: {after}"
+        # And it keeps playing, because it was playing.
+        page.wait_for_function(
+            "window.__players.some(p => p.getPlayerState() === 1)", timeout=10_000
+        )
+        browser.close()
+
+
+def test_rewind_does_not_start_a_paused_wall(running_server):
+    """seekTo resumes a player that is not already paused."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.click("#play")
+        page.wait_for_timeout(4000)
+        page.click("#pause")
+        page.wait_for_timeout(1200)
+
+        page.click("#rewind")
+        page.wait_for_timeout(2000)
+
+        first = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+        page.wait_for_timeout(2000)
+        second = page.evaluate("window.__players.map(p => p.getCurrentTime())")
+        advanced = [(i, a, b) for i, (a, b) in enumerate(zip(first, second)) if b - a > 0.5]
+        assert advanced == [], f"rewind restarted a paused wall: {advanced}"
+        assert all(t < 3 for t in second), f"not rewound: {second}"
         browser.close()
