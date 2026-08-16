@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from ytmatrix import budget, cache, gemini, letterbox, motion, querylog, server, youtube
-from ytmatrix.config import load_config
+from ytmatrix.config import CONFIG_KEY, load_config
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
 from ytmatrix.store import FileStore
@@ -159,11 +159,20 @@ def test_put_config_accepts_starting_unmuted(app_env):
 
 def test_a_rejected_put_leaves_an_oversized_grid_unsaved(app_env):
     """Gotcha 8 for the model-level validator: 99x99 exceeds one search's 50
-    results, and the refusal must not have written anything."""
-    app, _, _ = app_env
+    results, and the refusal must not have written anything.
+
+    Asserted against the store directly, NOT through GET /api/config. A stored
+    config that fails validation makes `load_config` fall back to the committed
+    template (config.py), so a config written before validation would land in
+    the store and be completely invisible through the route -- the obvious
+    place to look is the one place that hides this bug.
+    """
+    app, _, store = app_env
     with TestClient(app) as client:
-        client.put("/api/config", json={**VALID, "grid": {"cols": 99, "rows": 99}})
-        assert client.get("/api/config").json()["grid"] == {"cols": 4, "rows": 2}
+        response = client.put("/api/config", json={**VALID, "grid": {"cols": 99, "rows": 99}})
+
+    assert response.status_code == 422
+    assert asyncio.run(store.get(CONFIG_KEY)) is None, "a rejected PUT wrote to the store"
 
 
 def test_cache_status_reports_a_hit_for_already_cached_parameters(app_env):
@@ -390,6 +399,62 @@ def test_the_budget_blocks_generation_before_calling_gemini(generating_env, monk
     with TestClient(app) as client:
         assert client.post("/api/new-query").status_code == 429
     assert called == [], "Gemini must not be called when the search cannot be afforded"
+
+
+def test_the_config_limit_cannot_raise_the_global_ceiling(tmp_path, monkeypatch):
+    """`quota.daily_limit_units` lives in the shared, editable config, so it may
+    only ever LOWER the ceiling -- every wall spends from one API key and one
+    10,000-unit bucket, and a config anybody can edit must not be able to hand
+    itself more of it.
+
+    Both defaults are 10,000, so the wiring is invisible unless the two are
+    forced apart: without that, deleting `global_limit_units=` from the
+    resolve_videos call is a silent no-op.
+    """
+    default_path = tmp_path / "config.yaml"
+    default_path.write_text(yaml.safe_dump({**VALID, "quota": {"daily_limit_units": 1_000_000}}))
+    store = FileStore(tmp_path / "store")
+    app = create_app(
+        store=store,
+        settings=Settings(youtube_api_key="TEST_KEY", global_daily_units=100),
+        default_config_path=default_path,
+    )
+    stub_search(monkeypatch)
+    asyncio.run(budget.record_search(store))  # 100 spent; another would reach 200
+
+    with TestClient(app) as client:
+        response = client.get("/api/videos")
+
+    assert response.status_code == 429, "the config's million-unit limit was honoured"
+
+
+def test_the_global_ceiling_also_blocks_generation(tmp_path, monkeypatch):
+    """The same ceiling, on the other route that checks it. new-query has its
+    own would_exceed call, so it needs its own assertion."""
+    default_path = tmp_path / "config.yaml"
+    default_path.write_text(
+        yaml.safe_dump({**GENERATING, "quota": {"daily_limit_units": 1_000_000}})
+    )
+    store = FileStore(tmp_path / "store")
+    app = create_app(
+        store=store,
+        settings=Settings(
+            youtube_api_key="TEST_KEY", gemini_api_key="GEMINI_KEY", global_daily_units=100
+        ),
+        default_config_path=default_path,
+    )
+    stub_search(monkeypatch)
+    asyncio.run(budget.record_search(store))
+    called = []
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        called.append(theme)
+        return "should not happen"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        assert client.post("/api/new-query").status_code == 429
+    assert called == [], "Gemini must not be called past the project-wide ceiling"
 
 
 def test_a_successful_search_records_its_cost(app_env, monkeypatch):
@@ -1042,6 +1107,27 @@ def test_new_query_passes_the_clients_history_to_gemini(generating_env, monkeypa
     assert seen["history"] == ["a", "b"]
 
 
+def test_only_the_most_recent_history_reaches_gemini(generating_env, monkeypatch):
+    """`avoid_repeats` bounds what the browser's history contributes to the
+    prompt. The history now arrives on the request, so nothing but this slice
+    stands between a browser's whole stored list and the Gemini call."""
+    app, _, _ = generating_env  # GENERATING sets avoid_repeats: 20
+    stub_search(monkeypatch)
+    seen = {}
+
+    async def capture(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        seen["avoid"] = list(avoid)
+        return "invented"
+
+    monkeypatch.setattr(gemini, "generate_query", capture)
+    history = [f"q{i:02d}" for i in range(25)]
+    with TestClient(app) as client:
+        client.post("/api/new-query", json={"history": history})
+
+    assert len(seen["avoid"]) == 20
+    assert seen["avoid"] == history[-20:], "the OLDEST entries must be the ones dropped"
+
+
 def test_avoid_repeats_of_zero_means_no_avoid_list(generating_env, monkeypatch):
     """`history[-0:]` is `history[0:]` -- the WHOLE list. Setting avoid_repeats
     to 0 must mean "do not avoid repeats", not "avoid every query this browser
@@ -1095,6 +1181,23 @@ def test_the_query_log_records_who_asked(app_env):
     with TestClient(app) as client:
         client.get("/api/videos", headers={"X-Wall-User": "A@B.com"})
     assert asyncio.run(querylog.read_all(store))[0]["user"] == "a@b.com"
+
+
+def test_the_log_distinguishes_a_client_query_from_the_shared_one(app_env):
+    """`source` is what tells an operator reading the log whether somebody was
+    watching a query they chose or the one everybody gets. All three cases in
+    one test, because the fallback is the one that could silently mislabel:
+    an unknown query is served as "config", not as the client's."""
+    app, _, store = app_env
+    seed_cache(store)
+    cached = seed_query(store, "already searched")
+    with TestClient(app) as client:
+        client.get("/api/videos")
+        client.get("/api/videos", params={"query": cached})
+        client.get("/api/videos", params={"query": "never searched before"})
+
+    sources = [entry["source"] for entry in asyncio.run(querylog.read_all(store))]
+    assert sources == ["config", "client", "config"]
 
 
 def test_the_html_routes_are_gone(app_env):

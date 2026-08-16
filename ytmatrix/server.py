@@ -511,13 +511,17 @@ def create_app(
         # The avoid-list lives in the caller's browser now, so it arrives on the
         # request rather than being read from disk.
         raw_history = payload.get("history")
-        history = [str(q) for q in raw_history] if isinstance(raw_history, list) else []
-        # Guarded, not sliced directly: `history[-0:]` is `history[0:]`, the
-        # whole list -- so a config of 0, which means "do not avoid repeats",
-        # would hand Gemini maximum avoidance and a prompt carrying every
+        if not isinstance(raw_history, list):
+            raw_history = []
+        # Sliced before it is converted, never after. Only the tail is ever
+        # used, and the length of the posted list is the caller's choice rather
+        # than ours -- the browser caps its own history, but the request body is
+        # not the browser. Guarded, because `history[-0:]` is `history[0:]`, the
+        # whole list: a config of 0, which means "do not avoid repeats", would
+        # otherwise hand Gemini maximum avoidance and a prompt carrying every
         # query this browser has ever stored.
         keep = config.query_generation.avoid_repeats
-        avoid = history[-keep:] if keep else []
+        avoid = [str(q) for q in raw_history[-keep:]] if keep else []
 
         try:
             query = await gemini.generate_query(
