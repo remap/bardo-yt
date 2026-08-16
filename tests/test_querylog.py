@@ -126,3 +126,43 @@ async def test_cache_hits_are_distinguishable_from_fresh_searches(store):
     await querylog.append(store, querylog.build_entry(**{**ENTRY, "from_cache": True}))
     await querylog.append(store, querylog.build_entry(**{**ENTRY, "from_cache": False}))
     assert [e["from_cache"] for e in await querylog.read_all(store)] == [True, False]
+
+
+async def test_non_utf8_bytes_are_skipped_not_fatal(store):
+    """json.loads on bytes sniffs an encoding first; bytes that decode under
+    none of UTF-8/16/32 raise UnicodeDecodeError, a sibling of
+    JSONDecodeError rather than a subclass. One corrupt object must not
+    abort reading the rest of the log."""
+    await querylog.append(store, {"query": "good"})
+    await store.put("logs/2026-08-16/corrupt.json", b"\xff\xfe\x00\x01garbage-not-valid")
+    assert [e["query"] for e in await querylog.read_all(store)] == ["good"]
+
+
+async def test_logging_never_raises_on_an_unserialisable_entry(store):
+    # A set is not JSON-serialisable. json.dumps blowing up on a bad entry
+    # must be swallowed exactly like a storage failure -- that is the
+    # guarantee that actually protects the wall, not just the store.put path.
+    await querylog.append(store, {"query": "q", "bad": {1, 2, 3}})  # must not raise
+
+
+async def test_ordering_survives_even_when_the_clock_does_not_advance(store, monkeypatch):
+    """Regression guard for the original bug: keying purely off a
+    second-precision timestamp let three rapid appends collide and fall back
+    to a random uuid tiebreak, scattering their order. Forced deterministically
+    here -- rather than relying on a tight loop happening to land inside the
+    same second on whatever machine runs it -- by freezing datetime.now() to
+    return the literal same instant on every call. If ordering only came from
+    the timestamp, this would be unwinnable; the per-process monotonic counter
+    in `_entry_key` is what makes it deterministic regardless of clock
+    resolution."""
+    frozen = datetime(2026, 8, 16, 12, 0, 0, 0).astimezone()
+
+    class FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return frozen
+
+    monkeypatch.setattr(querylog, "datetime", FrozenDatetime)
+    for i in range(3):
+        await querylog.append(store, {"query": f"q{i}"})
+    assert [e["query"] for e in await querylog.read_all(store)] == ["q0", "q1", "q2"]

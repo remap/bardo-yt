@@ -21,6 +21,7 @@ answering different questions and should not be merged.
 
 from __future__ import annotations
 
+import itertools
 import json
 import uuid
 from datetime import datetime
@@ -28,6 +29,18 @@ from datetime import datetime
 from ytmatrix.store import Store
 
 KEY_PREFIX = "logs/"
+
+# A per-process tiebreaker for `_entry_key`. Microsecond wall-clock resolution
+# is not actually a floor: some platforms' system clocks are coarser than
+# that (Windows is commonly ~15ms), and a frozen/mocked clock in a test can
+# return the exact same instant on every call. Either way, two appends made
+# back-to-back in this process must still sort in call order, so a strictly
+# monotonic counter rides alongside the timestamp as the real tiebreaker.
+# It resets to 0 on every restart, which is fine: it only has to out-order
+# entries from *this* process's lifetime, and the timestamp segment in front
+# of it already separates those from everything written before or by another
+# container.
+_sequence = itertools.count()
 
 
 def local_timestamp(now: datetime | None = None) -> str:
@@ -41,12 +54,14 @@ def _entry_key(now: datetime) -> str:
     # human-readable "at" stored in the record, but not for the key: a
     # handful of searches easily land in the same second, and at
     # second-resolution the tiebreak would fall to the uuid suffix and scatter
-    # them. The key gets microsecond resolution instead, so entries sort in
-    # the order they were actually written; the uuid suffix still exists
-    # purely to keep two truly-simultaneous writes from colliding, not to
-    # order them.
+    # them. Microsecond resolution shrinks that window a great deal but does
+    # not close it (see `_sequence` above), so the monotonic counter is what
+    # actually guarantees call order; the uuid suffix's job is narrower --
+    # keeping two genuinely concurrent writers (different processes/
+    # containers) from colliding on an identical key, not ordering them.
     stamp = now.isoformat(timespec="microseconds")
-    return f"{KEY_PREFIX}{stamp[:10]}/{stamp}-{uuid.uuid4().hex[:8]}.json"
+    seq = next(_sequence)
+    return f"{KEY_PREFIX}{stamp[:10]}/{stamp}-{seq:012d}-{uuid.uuid4().hex[:8]}.json"
 
 
 async def append(store: Store, entry: dict, *, email: str | None = None) -> None:
@@ -71,7 +86,11 @@ async def read_all(store: Store) -> list[dict]:
             continue
         try:
             entries.append(json.loads(raw))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # json.loads on bytes sniffs an encoding first; bytes that decode
+            # under none of UTF-8/16/32 raise UnicodeDecodeError, a sibling
+            # of JSONDecodeError rather than a subclass. One corrupt object
+            # must not abort reading the rest of the log.
             continue
     return entries
 
