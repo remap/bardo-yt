@@ -14,5 +14,7 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+"$(dirname "$0")/scripts/build-dist.sh"
+
 # main() generates the self-signed cert on first run before uvicorn binds.
 exec uv run python -m ytmatrix.main

@@ -1,5 +1,6 @@
 .env
 cache/
+dist/
 *.pem
 *.key
 __pycache__/

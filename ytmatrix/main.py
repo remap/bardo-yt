@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 
 import uvicorn
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from ytmatrix.certs import ensure_cert, mkcert_ca_installed
@@ -47,6 +48,15 @@ def main() -> None:
     # these and the container never sees the request.
     dist = REPO_ROOT / "dist"
     if dist.is_dir():
+        # Cloudflare's static-asset serving strips ".html" from clean URLs, so
+        # /config resolves to config.html there. Starlette's StaticFiles(html=
+        # True) only does the equivalent for "/" -> index.html, not arbitrary
+        # paths, so /config would 404 locally without this. This is the one
+        # extra route the existing <a href="/config"> link already expects.
+        @app.get("/config", include_in_schema=False)
+        async def _config_page() -> FileResponse:
+            return FileResponse(dist / "config.html")
+
         app.mount("/", StaticFiles(directory=dist, html=True), name="dist")
 
     uvicorn.run(
