@@ -24,6 +24,8 @@ import {
   rectFor,
   zoomAt,
   IDENTITY_VIEW,
+  needsRefetch,
+  overridesStoredQuery,
 } from "./grid-logic.js";
 
 test("videoUrl includes the timestamp in whole seconds", () => {
@@ -695,4 +697,38 @@ test("isAudible follows the target", () => {
   assert.equal(isAudible(2, 3), false);
   assert.equal(isAudible(2, AUDIO_ALL), true);
   assert.equal(isAudible(2, AUDIO_NONE), false);
+});
+
+test("no change needs no refetch", () => {
+  const config = { query: "a", search: { order: "relevance" }, grid: { cols: 4, rows: 2 } };
+  assert.equal(needsRefetch(config, config), false);
+});
+
+test("a changed search parameter needs a refetch", () => {
+  const before = { query: "a", search: { order: "relevance" }, grid: { cols: 4, rows: 2 } };
+  const after = { query: "a", search: { order: "date" }, grid: { cols: 4, rows: 2 } };
+  assert.equal(needsRefetch(before, after), true);
+});
+
+test("a changed cell count needs a refetch", () => {
+  const before = { query: "a", search: {}, grid: { cols: 4, rows: 2 } };
+  const after = { query: "a", search: {}, grid: { cols: 5, rows: 2 } };
+  assert.equal(needsRefetch(before, after), true);
+});
+
+test("a cosmetic change needs no refetch", () => {
+  const before = { query: "a", search: {}, grid: { cols: 4, rows: 2 }, playback: { loop: true } };
+  const after = { query: "a", search: {}, grid: { cols: 4, rows: 2 }, playback: { loop: false } };
+  assert.equal(needsRefetch(before, after), false);
+});
+
+test("an edited config query overrides whatever the browser was watching", () => {
+  const before = { query: "a", search: {}, grid: { cols: 4, rows: 2 } };
+  const after = { query: "b", search: {}, grid: { cols: 4, rows: 2 } };
+  assert.equal(overridesStoredQuery(before, after), true);
+});
+
+test("an unchanged config query leaves the browser's own query alone", () => {
+  const config = { query: "a", search: { order: "date" }, grid: { cols: 4, rows: 2 } };
+  assert.equal(overridesStoredQuery(config, { ...config, search: { order: "relevance" } }), false);
 });

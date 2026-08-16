@@ -14,6 +14,7 @@ script and a module.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
@@ -27,6 +28,7 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 from ytmatrix import cache, youtube
+from ytmatrix.store import FileStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -76,7 +78,17 @@ def running_server(tmp_path):
         "uSAPVDS2LUo",
     ]
     ids = [base[i % len(base)] for i in range(50)]
-    cache.write(cache_dir, params, [{"video_id": v, "title": v, "channel": "c"} for v in ids])
+    # cache.write is async and goes through a Store, not a directory -- the
+    # container has no durable disk. asyncio.run because this fixture is sync:
+    # calling it without awaiting builds a coroutine, seeds nothing, and every
+    # test in this file then sits waiting on a live search that never comes.
+    asyncio.run(
+        cache.write(
+            FileStore(cache_dir),
+            params,
+            [{"video_id": v, "title": v, "channel": "c"} for v in ids],
+        )
+    )
 
     port = _find_free_port()
     env = {

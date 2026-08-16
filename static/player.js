@@ -17,8 +17,11 @@ import {
   AUDIO_ALL,
   AUDIO_NONE,
   IDENTITY_VIEW,
+  needsRefetch,
+  overridesStoredQuery,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
+import { clearQuery, loadHistory, loadQuery, pushHistory, saveQuery } from "./wallstate.js";
 
 const gridEl = document.getElementById("grid");
 const statusEl = document.getElementById("status");
@@ -591,10 +594,20 @@ async function requestNewQuery(prompt = null) {
     const response = await fetch("/api/new-query", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(prompt ? { prompt } : {}),
+      body: JSON.stringify({
+        ...(prompt ? { prompt } : {}),
+        // The avoid-list lives here now, so it has to travel with the request.
+        history: loadHistory(),
+      }),
     });
     if (response.ok) {
-      applyVideos(await response.json());
+      const message = await response.json();
+      // Remember it before applying: a reload must land on the same wall, and
+      // replaying a stored query costs nothing (the server serves it from
+      // cache or falls back -- it never re-searches).
+      saveQuery(message.query);
+      pushHistory(message.query);
+      applyVideos(message);
       return true;
     }
     // A failed generation must leave the wall working, not blank.
@@ -634,13 +647,32 @@ async function resync() {
     if (await requestNewQuery()) return;
   }
 
-  const videosResponse = await fetch("/api/videos");
+  const stored = loadQuery();
+  const videosResponse = await fetch(
+    stored ? `/api/videos?query=${encodeURIComponent(stored)}` : "/api/videos",
+  );
   if (!videosResponse.ok) {
     const body = await videosResponse.json().catch(() => ({}));
     setStatus(body.detail ?? `error ${videosResponse.status}`, "error");
     return;
   }
-  applyVideos(await videosResponse.json());
+  const message = await videosResponse.json();
+  // Store ONLY what New query hands us -- never what /api/videos served.
+  //
+  // A browser that has never pressed New query must keep sending no query at
+  // all, so the server uses the shared config query on its normal path where
+  // cache.ttl_hours still applies. Storing whatever came back would put the
+  // config query onto the client path too, which is served cache-only and
+  // never re-searches -- the wall would then never refresh on its own, and
+  // `source: "client"` in the query log would stop distinguishing anything.
+  //
+  // The one thing worth writing here is a deletion: if we sent a stored query
+  // and the server answered with a different one, our query has aged out of
+  // the shared cache and is gone. Clearing lets this browser fall back to the
+  // shared query cleanly. Storing the fallback instead would pin it as a
+  // client query forever, which is the same bug wearing a different hat.
+  if (stored && message.query !== stored) clearQuery();
+  applyVideos(message);
 }
 
 newQueryButton.addEventListener("click", () => requestNewQuery());
@@ -993,10 +1025,15 @@ connectSocket({
   onReconnect: resync,
   onMessage: (message) => {
     if (message.type === "config") {
-      const change = classifyConfigChange(config, message.config);
+      const previous = config;
+      const change = classifyConfigChange(previous, message.config);
       config = message.config;
       if (change === "rebuild") rebuild();
       else if (change === "in-place") applyInPlace();
+      // Someone typed a query on the config page: that is an explicit
+      // override and it beats whatever this browser had stored.
+      if (overridesStoredQuery(previous, message.config)) clearQuery();
+      if (needsRefetch(previous, message.config)) resync();
     } else if (message.type === "videos") {
       applyVideos(message);
     }
