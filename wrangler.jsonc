@@ -8,6 +8,10 @@
   "assets": {
     "directory": "./dist",
     "binding": "ASSETS",
+    // Stated rather than left to the default, because it is doing real
+    // routing work: index.html links to "/config" and the file on disk is
+    // config.html. Set this to "none" and that link 404s.
+    "html_handling": "auto-trailing-slash",
     // Everything else is served straight from dist/ without invoking the
     // Worker. Access still protects those files -- it runs at the edge,
     // before any of this.

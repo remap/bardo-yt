@@ -10,6 +10,10 @@
     "strict": true,
     "skipLibCheck": true
   },
+  // worker-configuration.d.ts is generated and gitignored, so a bare
+  // `tsc --noEmit` on a fresh clone fails with TS2688 before it typechecks a
+  // single line. Run `npm run typecheck`, which generates it first.
+  //
   // The Worker only. static/ and dist/ are hand-written browser JS with no
   // types and no build step -- node --test covers them instead.
   "include": ["worker/**/*.ts", "worker-configuration.d.ts"]

@@ -33,11 +33,19 @@ export class Wall extends Container {
 }
 
 // createRemoteJWKSet caches and refreshes the key set itself; building a new
-// one per request would refetch Cloudflare's certs on every call.
-let jwks: ReturnType<typeof createRemoteJWKSet> | undefined;
+// one per request would refetch Cloudflare's certs on every call. Keyed by
+// domain rather than held in a single slot, so the cache cannot outlive a
+// change to ACCESS_TEAM_DOMAIN and go on verifying against the old team's
+// certs. One deployment only ever has one domain -- this is about the
+// function telling the truth about its own argument.
+const jwksByDomain = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 function keySet(teamDomain: string) {
-  jwks ??= createRemoteJWKSet(new URL(`${teamDomain}/cdn-cgi/access/certs`));
-  return jwks;
+  let set = jwksByDomain.get(teamDomain);
+  if (!set) {
+    set = createRemoteJWKSet(new URL(`${teamDomain}/cdn-cgi/access/certs`));
+    jwksByDomain.set(teamDomain, set);
+  }
+  return set;
 }
 
 async function verifiedEmail(
@@ -48,12 +56,19 @@ async function verifiedEmail(
   if (!token) return null;
   try {
     const { payload } = await jwtVerify(token, keySet(env.ACCESS_TEAM_DOMAIN), {
+      // Access signs with RS256. Naming it means a token cannot argue for a
+      // weaker algorithm in its own header -- jose would reject the swap
+      // anyway, having resolved an asymmetric key by kid, but an auth
+      // boundary should not depend on a second line of defence.
+      algorithms: ["RS256"],
       issuer: env.ACCESS_TEAM_DOMAIN,
       audience: env.ACCESS_POLICY_AUD,
     });
-    const email = String(payload.email ?? "")
-      .trim()
-      .toLowerCase();
+    // Type-checked, not coerced. `String(payload.email)` would turn a
+    // non-string claim into a perfectly good-looking identity; a service
+    // token carries `common_name` and no email at all, and must fail here.
+    if (typeof payload.email !== "string") return null;
+    const email = payload.email.trim().toLowerCase();
     return email || null;
   } catch {
     return null;
@@ -67,6 +82,10 @@ export default {
     // Unauthenticated on purpose: this is the Worker's own liveness, and it
     // must answer before Access is configured or the first deploy cannot be
     // checked at all.
+    //
+    // It shadows the container's identically-named endpoint and never reaches
+    // it, so a green /healthz proves the Worker is up and says NOTHING about
+    // the container. To check that, hit an authenticated /api/config.
     if (url.pathname === "/healthz") {
       return Response.json({ status: "ok" });
     }
@@ -83,22 +102,17 @@ export default {
     headers.delete("x-wall-user");
     headers.set("X-Wall-User", email);
 
-    // A constant name, so every user lands on the same instance. WebSocket
-    // upgrades forward through this same call -- the Container class proxies
-    // them to the container's port without special handling.
+    // A constant name, so every user lands on the same instance.
+    //
+    // /ws rides this same call: the Container class is expected to carry the
+    // upgrade through to the container's port with no special handling. That
+    // is the one line here nothing has executed -- Docker was down, so no
+    // local run ever opened a socket through it. If the wall loads but never
+    // populates, suspect this before anything else.
+    //
+    // The stub's Response is returned UNWRAPPED, and must stay that way: a
+    // 101 carries its half of the socket on `response.webSocket`, which
+    // `new Response(res.body, res)` silently drops.
     return env.WALL.getByName("wall").fetch(new Request(request, { headers }));
   },
 } satisfies ExportedHandler<Env>;
-
-interface Env {
-  WALL: DurableObjectNamespace<Wall>;
-  ACCESS_TEAM_DOMAIN: string;
-  ACCESS_POLICY_AUD: string;
-  YOUTUBE_API_KEY: string;
-  GEMINI_API_KEY: string;
-  R2_ACCOUNT_ID: string;
-  R2_ACCESS_KEY_ID: string;
-  R2_SECRET_ACCESS_KEY: string;
-  R2_BUCKET: string;
-  YTMATRIX_GLOBAL_DAILY_UNITS: string;
-}

@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "./scripts/build-dist.sh",
+    "typecheck": "wrangler types && tsc --noEmit",
     "dev": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy"
   },
