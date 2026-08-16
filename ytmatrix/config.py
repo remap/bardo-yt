@@ -6,6 +6,8 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from ytmatrix.store import Store
+
 # One search.list call returns at most 50 items, and costs the same 100 quota
 # units whether you ask for 1 or 50. See spec section 4.
 MAX_SEARCH_RESULTS = 50
@@ -183,12 +185,29 @@ def merge_config(current: dict, payload: dict) -> dict:
     return merged
 
 
-def load_config(path: Path) -> Config:
-    return Config.model_validate(yaml.safe_load(path.read_text()) or {})
+#: One config for the whole installation. Everybody edits the same document
+#: and a save is visible to everyone -- that is the point of the config page.
+#: What is *not* shared is which query each person is watching; that lives in
+#: their own browser (static/wallstate.js), so pressing New query changes only
+#: your wall.
+CONFIG_KEY = "config.yaml"
+
+#: The committed config.yaml ships inside the container image and is the
+#: document the installation starts from before anyone has pressed Save.
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yaml"
 
 
-def save_config(config: Config, path: Path) -> None:
+async def load_config(store: Store, *, default_path: Path = DEFAULT_CONFIG_PATH) -> Config:
+    raw = await store.get(CONFIG_KEY)
+    if raw is None:
+        # Nothing saved yet: fall back to the image's committed template
+        # rather than writing a copy now, so a fresh install costs no storage
+        # and picks up changes to the shipped defaults.
+        return Config.model_validate(yaml.safe_load(default_path.read_text()) or {})
+    return Config.model_validate(yaml.safe_load(raw.decode("utf-8")) or {})
+
+
+async def save_config(config: Config, store: Store) -> None:
     payload = config.model_dump(mode="json")
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(yaml.safe_dump(payload, sort_keys=False, allow_unicode=True))
-    tmp.replace(path)
+    body = yaml.safe_dump(payload, sort_keys=False, allow_unicode=True)
+    await store.put(CONFIG_KEY, body.encode("utf-8"))

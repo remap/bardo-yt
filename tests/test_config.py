@@ -5,12 +5,14 @@ import yaml
 from pydantic import ValidationError
 
 from ytmatrix.config import (
+    CONFIG_KEY,
     MAX_SEARCH_RESULTS,
     Config,
     load_config,
     merge_config,
     save_config,
 )
+from ytmatrix.store import FileStore
 
 VALID = {
     "query": "golden cover",
@@ -37,24 +39,77 @@ def write_yaml(tmp_path: Path, data: dict) -> Path:
     return path
 
 
-def test_the_committed_config_is_valid():
+@pytest.fixture
+def store(tmp_path):
+    # A subdirectory of its own, not tmp_path itself: default_path's template
+    # file also lives under tmp_path, and list_keys("") must see only what was
+    # actually written through the store, not an unrelated sibling file.
+    return FileStore(tmp_path / "store")
+
+
+@pytest.fixture
+def default_path(tmp_path):
+    # grid is a required field with no default (Config demands one search's
+    # worth of cells or fewer) -- a query-only template is not a valid config,
+    # so a minimal grid rides along purely to make this template loadable.
+    path = tmp_path / "default.yaml"
+    path.write_text("query: seeded from the image\ngrid:\n  cols: 1\n  rows: 1\n")
+    return path
+
+
+async def test_the_committed_config_is_valid(store):
     """config.yaml is committed but also rewritten at runtime by /config.
 
     So this asserts it still parses and is coherent, not that it holds any
     particular grid or query -- those are the operator's, and pinning them
-    here just breaks the suite every time someone resizes the wall.
+    here just breaks the suite every time someone resizes the wall. The store
+    is empty, so this falls back to the real, repo-root DEFAULT_CONFIG_PATH.
     """
-    config = load_config(Path("config.yaml"))
+    config = await load_config(store)
     assert config.query
     assert config.grid.cells >= 1
     assert config.grid.cells <= MAX_SEARCH_RESULTS
 
 
-def test_round_trips_through_yaml(tmp_path):
-    path = write_yaml(tmp_path, VALID)
-    original = load_config(path)
-    save_config(original, path)
-    assert load_config(path) == original
+async def test_round_trips_through_yaml(store, tmp_path):
+    # Named differently from CONFIG_KEY ("config.yaml") on purpose: this file
+    # shares tmp_path with `store`, and a same-named template would collide
+    # with the key the store itself writes.
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text(yaml.safe_dump(VALID))
+    original = await load_config(store, default_path=default_path)
+    await save_config(original, store)
+    assert await load_config(store, default_path=default_path) == original
+
+
+async def test_unsaved_config_falls_back_to_the_bundled_default(store, default_path):
+    config = await load_config(store, default_path=default_path)
+    assert config.query == "seeded from the image"
+
+
+async def test_saved_config_is_read_back(store, default_path):
+    config = await load_config(store, default_path=default_path)
+    await save_config(config.model_copy(update={"query": "ours"}), store)
+    assert (await load_config(store, default_path=default_path)).query == "ours"
+
+
+async def test_a_save_is_visible_to_everyone(store, default_path):
+    """Config is shared: there is exactly one key, not one per user."""
+    config = await load_config(store, default_path=default_path)
+    await save_config(config.model_copy(update={"query": "ours"}), store)
+    assert await store.list_keys("") == [CONFIG_KEY]
+
+
+async def test_saved_config_is_readable_yaml(store, default_path):
+    config = await load_config(store, default_path=default_path)
+    await save_config(config.model_copy(update={"query": "ours"}), store)
+    assert b"query: ours" in await store.get(CONFIG_KEY)
+
+
+async def test_unicode_survives_a_save(store, default_path):
+    config = await load_config(store, default_path=default_path)
+    await save_config(config.model_copy(update={"query": "케이팝 커버"}), store)
+    assert (await load_config(store, default_path=default_path)).query == "케이팝 커버"
 
 
 def test_grid_cells_is_the_product():
@@ -126,10 +181,9 @@ def test_a_rejected_edit_leaves_the_file_on_disk_untouched(tmp_path):
     assert path.read_text() == before
 
 
-def test_saved_yaml_contains_no_api_key_field(tmp_path):
-    path = tmp_path / "config.yaml"
-    save_config(Config.model_validate(VALID), path)
-    assert "key" not in path.read_text().lower()
+async def test_saved_yaml_contains_no_api_key_field(store):
+    await save_config(Config.model_validate(VALID), store)
+    assert "key" not in (await store.get(CONFIG_KEY)).decode("utf-8").lower()
 
 
 # --- merging edits ---------------------------------------------------------

@@ -18,7 +18,6 @@ from ytmatrix import (
     motion,
     origin,
     querylog,
-    wallstate,
     youtube,
 )
 from ytmatrix.config import Config, load_config, merge_config, save_config
