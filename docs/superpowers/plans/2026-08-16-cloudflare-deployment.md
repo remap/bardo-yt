@@ -543,12 +543,17 @@ async def motion_score(video_id: str, store: Store, client: httpx.AsyncClient) -
     key = f"motion/{video_id}.json"
     raw = await store.get(key)
     if raw is not None:
+        # The float() conversion belongs INSIDE the try. A corrupt score value
+        # -- {"score": "not-a-number"} -- must degrade to re-measuring like
+        # every other corruption shape, or one bad entry takes that video down
+        # permanently, because a raise means the entry never gets rewritten.
         try:
             cached = json.loads(raw)["score"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            cached = None
-        else:
-            return motion.UNKNOWN_SCORE if cached is None else float(cached)
+            if cached is not None:
+                return float(cached)
+            return motion.UNKNOWN_SCORE
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass  # Fall through and re-measure.
 
     async def frame(index: int) -> bytes | None:
         ...  # unchanged
@@ -710,8 +715,20 @@ async def test_global_cap_refuses_even_when_user_limit_is_huge(store):
 
 
 async def test_user_limit_can_still_lower_the_ceiling(store):
-    await store.put(budget.LEDGER_KEY, json.dumps({"date": "2026-08-16", "units": 400}).encode())
+    await store.put(budget.LEDGER_KEY, json.dumps({"date": "2026-08-16", "units": 450}).encode())
     assert await budget.would_exceed(store, 500, global_limit_units=10_000, today="2026-08-16") is True
+
+
+async def test_landing_exactly_on_the_limit_is_allowed(store):
+    """`would_exceed` means "would push PAST the limit", not "would reach it".
+
+    Landing exactly on the ceiling is permitted, and that is worth a test of
+    its own: flipping this comparison to `>=` costs a whole search per day at
+    any limit — 100 units of the scarcest resource the app has — while looking
+    like harmless conservatism.
+    """
+    await store.put(budget.LEDGER_KEY, json.dumps({"date": "2026-08-16", "units": 400}).encode())
+    assert await budget.would_exceed(store, 500, global_limit_units=10_000, today="2026-08-16") is False
 
 
 async def test_concurrent_records_do_not_lose_increments(store):
@@ -868,13 +885,18 @@ from ytmatrix.store import FileStore
 
 @pytest.fixture
 def store(tmp_path):
-    return FileStore(tmp_path)
+    # A subdirectory, NOT tmp_path itself: default_path writes the seed template
+    # into tmp_path, and a store rooted there would list that file as a key and
+    # break test_a_save_is_visible_to_everyone's single-key assertion.
+    return FileStore(tmp_path / "store")
 
 
 @pytest.fixture
 def default_path(tmp_path):
+    # Must be a complete, valid config -- Config.model_validate rejects a
+    # document missing required sections, so `query:` alone will not load.
     path = tmp_path / "default.yaml"
-    path.write_text("query: seeded from the image\n")
+    path.write_text(yaml.safe_dump({**VALID, "query": "seeded from the image"}))
     return path
 
 
@@ -1062,12 +1084,20 @@ def local_timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
-def _entry_key(at: str) -> str:
+def _entry_key(now: datetime) -> str:
     # The date prefix keeps a day's worth of entries listable without scanning
     # the whole log, and the uuid suffix keeps two users searching in the same
-    # second from overwriting each other -- there is no append in object
+    # instant from overwriting each other -- there is no append in object
     # storage, so every entry is its own object.
-    return f"{KEY_PREFIX}{at[:10]}/{at}-{uuid.uuid4().hex[:8]}.json"
+    #
+    # MICROSECONDS here, deliberately, even though the record's readable `at`
+    # field stays at second precision. Ordering comes entirely from sorting
+    # these keys, so a second-precision key would leave everything logged
+    # within the same second to be ordered by the random uuid suffix -- i.e.
+    # not ordered at all. Pass one `now` through both so the key and the field
+    # can never disagree.
+    stamp = now.isoformat(timespec="microseconds")
+    return f"{KEY_PREFIX}{stamp[:10]}/{stamp}-{uuid.uuid4().hex[:8]}.json"
 
 
 async def append(store: Store, entry: dict, *, email: str | None = None) -> None:
@@ -1092,7 +1122,12 @@ async def read_all(store: Store) -> list[dict]:
             continue
         try:
             entries.append(json.loads(raw))
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # UnicodeDecodeError matters as much as the JSON error and is NOT a
+            # subclass of it: json.loads on *bytes* sniffs an encoding first, so
+            # genuinely non-UTF-8 bytes raise from the decode rather than the
+            # parse. Catching only JSONDecodeError lets one corrupt object abort
+            # the read of the entire log instead of skipping that one entry.
             continue
     return entries
 ```
