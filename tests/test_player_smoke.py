@@ -1121,3 +1121,62 @@ def test_rewind_does_not_start_a_paused_wall(running_server):
         assert advanced == [], f"rewind restarted a paused wall: {advanced}"
         assert all(t < 3 for t in second), f"not rewound: {second}"
         browser.close()
+
+
+def test_a_browser_that_has_not_pressed_new_query_stores_nothing(running_server):
+    """Only what /api/new-query returns is stored -- never what /api/videos served.
+
+    This is the rule the whole per-browser design turns on, and it is invisible
+    to every other test in this file: they all start from a fresh context with
+    empty localStorage and a cached config query, so a regression that stored
+    `message.query` would leave all of their assertions passing.
+
+    What it would break instead is quiet and slow. The shared config query would
+    land in localStorage on first load and thereafter be supplied as a *client*
+    query -- which the server serves cache-only and never re-searches. So
+    cache.ttl_hours would go inert, the wall would stop refreshing on its own,
+    and `source: "client"` in the query log would cease to distinguish anything.
+    Nobody would notice for months. Hence an explicit assertion.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        # A cell holding an iframe means the videos response has already been
+        # applied -- so whatever was going to be written, has been written.
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        assert page.evaluate("localStorage.getItem('ytmatrix.query')") is None
+        browser.close()
+
+
+def test_a_stored_query_the_shared_cache_no_longer_holds_is_cleared(running_server):
+    """The other half of the rule: the one write on the /api/videos path is a deletion.
+
+    A stored query is honoured only while the shared cache still holds it. Once
+    it ages out the server silently answers with the config query instead, and
+    this browser has to drop its own so it falls back cleanly. Storing the
+    fallback instead would pin it as a client query forever -- the same bug
+    wearing a different hat.
+
+    Costs no quota: an unhonoured client query falls back to the config query,
+    which this fixture has seeded, so the server searches nothing.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        # Stand in for a query that has aged out of the shared cache. Set after
+        # the first load rather than via an init script, which would put it back
+        # on the reload and prove nothing.
+        page.evaluate("localStorage.setItem('ytmatrix.query', 'a query no cache ever held')")
+        page.reload(wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        assert page.evaluate("localStorage.getItem('ytmatrix.query')") is None
+        # And it fell back to the shared query rather than to an empty wall.
+        assert "golden cover" in page.evaluate("document.getElementById('status').textContent")
+        assert page.locator('.cell[data-empty="true"]').count() == 0
+        browser.close()

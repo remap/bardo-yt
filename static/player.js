@@ -1023,19 +1023,21 @@ refreshControls();
 
 connectSocket({
   onReconnect: resync,
+  // Config is the only thing broadcast. Nothing pushes a video set any more:
+  // the server does not know what query any given browser is watching, so a
+  // wall only ever changes its own videos -- on its own resync, or off its own
+  // New query. Deciding whether a config change means this browser has to
+  // refetch is therefore the client's job, done right here.
   onMessage: (message) => {
-    if (message.type === "config") {
-      const previous = config;
-      const change = classifyConfigChange(previous, message.config);
-      config = message.config;
-      if (change === "rebuild") rebuild();
-      else if (change === "in-place") applyInPlace();
-      // Someone typed a query on the config page: that is an explicit
-      // override and it beats whatever this browser had stored.
-      if (overridesStoredQuery(previous, message.config)) clearQuery();
-      if (needsRefetch(previous, message.config)) resync();
-    } else if (message.type === "videos") {
-      applyVideos(message);
-    }
+    if (message.type !== "config") return;
+    const previous = config;
+    const change = classifyConfigChange(previous, message.config);
+    config = message.config;
+    if (change === "rebuild") rebuild();
+    else if (change === "in-place") applyInPlace();
+    // Someone typed a query on the config page: that is an explicit
+    // override and it beats whatever this browser had stored.
+    if (overridesStoredQuery(previous, message.config)) clearQuery();
+    if (needsRefetch(previous, message.config)) resync();
   },
 });
