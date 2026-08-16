@@ -1,7 +1,16 @@
 """An append-only record of every query the wall has run, and what it returned.
 
-One JSON object per line, newest last. Gitignored -- this is a running record
-of a particular installation, not source.
+This is a running record of a particular installation, not source. It stays
+global -- one record for the whole install, not per user -- but each entry
+carries the email of whoever ran the query; that email is the one and only
+thing this module does with user identity, nothing branches on it.
+
+R2 has no append, so it is no longer one JSON object per line in a single
+file: it is one object per entry, keyed under a date prefix. There is nothing
+to open and append to, only new objects to write, so ordering has to come
+from somewhere else -- it falls out of the key. Every key begins with an ISO
+timestamp and `Store.list_keys` returns keys sorted, so reading them in key
+order reads them oldest first for free.
 
 Timestamps are local with an explicit UTC offset (`2026-08-10T18:42:03-07:00`),
 so a line is readable at a glance by whoever is standing in front of the wall
@@ -13,39 +22,55 @@ answering different questions and should not be merged.
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime
-from pathlib import Path
 
-LOG_NAME = "queries.jsonl"
+from ytmatrix.store import Store
 
-
-def local_timestamp() -> str:
-    return datetime.now().astimezone().isoformat(timespec="seconds")
+KEY_PREFIX = "logs/"
 
 
-def append(log_dir: Path, entry: dict) -> None:
+def local_timestamp(now: datetime | None = None) -> str:
+    return (now or datetime.now().astimezone()).isoformat(timespec="seconds")
+
+
+def _entry_key(now: datetime) -> str:
+    # Sorting has to come from the key alone -- there is no append in object
+    # storage, so every entry is its own object and ordering falls out of
+    # `list_keys` returning sorted keys. Seconds are precise enough for the
+    # human-readable "at" stored in the record, but not for the key: a
+    # handful of searches easily land in the same second, and at
+    # second-resolution the tiebreak would fall to the uuid suffix and scatter
+    # them. The key gets microsecond resolution instead, so entries sort in
+    # the order they were actually written; the uuid suffix still exists
+    # purely to keep two truly-simultaneous writes from colliding, not to
+    # order them.
+    stamp = now.isoformat(timespec="microseconds")
+    return f"{KEY_PREFIX}{stamp[:10]}/{stamp}-{uuid.uuid4().hex[:8]}.json"
+
+
+async def append(store: Store, entry: dict, *, email: str | None = None) -> None:
     """Append one record. Never raises -- logging must not break the wall."""
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        line = json.dumps({"at": local_timestamp(), **entry}, ensure_ascii=False)
-        with (log_dir / LOG_NAME).open("a", encoding="utf-8") as handle:
-            handle.write(line + "\n")
-    except OSError:
+        now = datetime.now().astimezone()
+        record = {"at": local_timestamp(now), **entry}
+        if email:
+            record["user"] = email.strip().lower()
+        body = json.dumps(record, ensure_ascii=False).encode("utf-8")
+        await store.put(_entry_key(now), body)
+    except Exception:  # noqa: BLE001, S110 - a failed write must not fail the wall
         pass
 
 
-def read_all(log_dir: Path) -> list[dict]:
-    """Every record, oldest first. Malformed lines are skipped, not fatal."""
-    path = log_dir / LOG_NAME
-    if not path.exists():
-        return []
+async def read_all(store: Store) -> list[dict]:
+    """Every record, oldest first. Malformed objects are skipped, not fatal."""
     entries = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
+    for key in await store.list_keys(KEY_PREFIX):
+        raw = await store.get(key)
+        if raw is None:
             continue
         try:
-            entries.append(json.loads(line))
+            entries.append(json.loads(raw))
         except json.JSONDecodeError:
             continue
     return entries
