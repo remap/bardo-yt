@@ -1,0 +1,42 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "yt-matrix",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // Everything else is served straight from dist/ without invoking the
+    // Worker. Access still protects those files -- it runs at the edge,
+    // before any of this.
+    "run_worker_first": ["/api/*", "/ws", "/healthz"]
+  },
+
+  "containers": [
+    {
+      "class_name": "Wall",
+      "image": "./Dockerfile",
+      // Routing pins everyone to one instance; the headroom is for rolling
+      // deploys, when the old and new instances overlap briefly.
+      "max_instances": 3,
+      "instance_type": "basic"
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "WALL", "class_name": "Wall" }]
+  },
+
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Wall"] }],
+
+  "vars": {
+    "ACCESS_TEAM_DOMAIN": "https://REPLACE-ME.cloudflareaccess.com",
+    "ACCESS_POLICY_AUD": "REPLACE-ME",
+    "R2_BUCKET": "yt-matrix",
+    "YTMATRIX_GLOBAL_DAILY_UNITS": "10000"
+  },
+
+  "routes": [{ "pattern": "yt.bardo.jburke.io", "custom_domain": true }]
+}
