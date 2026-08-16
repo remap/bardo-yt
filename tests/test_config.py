@@ -112,6 +112,30 @@ async def test_unicode_survives_a_save(store, default_path):
     assert (await load_config(store, default_path=default_path)).query == "케이팝 커버"
 
 
+async def test_invalid_yaml_in_the_store_falls_back_to_the_default(store, default_path):
+    """A corrupt stored config must not 500 every route for every user.
+
+    Unlike the old per-operator config.yaml, this key backs the whole
+    installation -- a crash here takes everyone's wall down at once. The
+    fallback is also how the app recovers on its own: the next Save simply
+    overwrites the bad value.
+    """
+    await store.put(CONFIG_KEY, b": not: valid: yaml: [")
+    config = await load_config(store, default_path=default_path)
+    assert config.query == "seeded from the image"
+
+
+async def test_a_stored_config_missing_a_required_field_falls_back_to_the_default(
+    store, default_path
+):
+    """Covers schema evolution: a config saved by an older version can fail
+    validation against a newer, stricter Config without taking the wall down.
+    """
+    await store.put(CONFIG_KEY, b"query: no grid here\n")
+    config = await load_config(store, default_path=default_path)
+    assert config.query == "seeded from the image"
+
+
 def test_grid_cells_is_the_product():
     assert Config.model_validate(VALID).grid.cells == 8
 

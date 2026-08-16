@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from enum import StrEnum
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from ytmatrix.store import Store
+
+logger = logging.getLogger(__name__)
 
 # One search.list call returns at most 50 items, and costs the same 100 quota
 # units whether you ask for 1 or 50. See spec section 4.
@@ -187,9 +190,8 @@ def merge_config(current: dict, payload: dict) -> dict:
 
 #: One config for the whole installation. Everybody edits the same document
 #: and a save is visible to everyone -- that is the point of the config page.
-#: What is *not* shared is which query each person is watching; that lives in
-#: their own browser (static/wallstate.js), so pressing New query changes only
-#: your wall.
+#: What is *not* shared is which query each person is watching; that moves to
+#: the browser instead (Task 6b), so pressing New query changes only your wall.
 CONFIG_KEY = "config.yaml"
 
 #: The committed config.yaml ships inside the container image and is the
@@ -204,7 +206,31 @@ async def load_config(store: Store, *, default_path: Path = DEFAULT_CONFIG_PATH)
         # rather than writing a copy now, so a fresh install costs no storage
         # and picks up changes to the shipped defaults.
         return Config.model_validate(yaml.safe_load(default_path.read_text()) or {})
-    return Config.model_validate(yaml.safe_load(raw.decode("utf-8")) or {})
+    try:
+        return Config.model_validate(yaml.safe_load(raw.decode("utf-8")) or {})
+    except (yaml.YAMLError, ValidationError, UnicodeDecodeError):
+        # A stored config that no longer parses or validates must not take the
+        # whole installation down. Unlike the old per-operator config.yaml,
+        # this key backs everyone at once -- a corrupt write, or a schema that
+        # grew a new required field since this value was saved, would 500
+        # every route that touches config for every user simultaneously, with
+        # no in-app way back short of reaching into the bucket by hand.
+        #
+        # Falling back to the committed template mirrors cache.py and
+        # budget.py's "a corrupt entry is a miss, not a crash", and it
+        # self-heals: the next successful Save overwrites the bad value. But
+        # unlike a genuine store miss, this is not silent -- someone's saved
+        # config just stopped being honoured, so it's logged as a warning an
+        # operator can find, distinguishing "nobody has saved yet" (no log
+        # line) from "the saved config is corrupt and is being ignored" (this
+        # one).
+        logger.warning(
+            "stored config at %r is corrupt or fails validation; "
+            "falling back to the committed template until the next save",
+            CONFIG_KEY,
+            exc_info=True,
+        )
+        return Config.model_validate(yaml.safe_load(default_path.read_text()) or {})
 
 
 async def save_config(config: Config, store: Store) -> None:
