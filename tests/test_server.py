@@ -961,18 +961,37 @@ def test_an_unknown_client_query_never_spends_a_search(app_env):
 
 def test_a_stale_client_query_is_still_honoured(app_env, monkeypatch):
     """Expiry must not silently move somebody's wall back to the shared query;
-    the ids are the same ones they were already watching.
-
-    Expiry does still mean a refresh, exactly as it would for the shared query
-    -- what must not happen is the wall changing to a different query behind
-    the viewer's back."""
+    the ids are the same ones they were already watching."""
     app, _, store = app_env
     seed_cache(store)
     cached = seed_query(store, "watched yesterday")
-    stub_search(monkeypatch)
     monkeypatch.setattr(server.cache.time, "time", lambda: 1e12)
     with TestClient(app) as client:
         assert client.get("/api/videos", params={"query": cached}).json()["query"] == cached
+
+
+def test_a_stale_client_query_is_served_without_spending(app_env, monkeypatch):
+    """The other half of gotcha 2, and the one that is easy to miss: honouring
+    a client query is only free while its cache entry is fresh unless the
+    resolution is *also* pinned to cache. `resync()` runs on every WebSocket
+    reconnect, so without this an aged-out query turns a flapping connection
+    into 100 units a head.
+
+    Deliberately does not stub `youtube.search`: conftest's guard is the
+    assertion. If this path ever searches again, the test says so.
+    """
+    app, _, store = app_env
+    seed_cache(store)
+    cached = seed_query(store, "watched yesterday")
+    monkeypatch.setattr(server.cache.time, "time", lambda: 1e12)
+    with TestClient(app) as client:
+        body = client.get("/api/videos", params={"query": cached}).json()
+
+    assert body["query"] == cached
+    assert body["video_ids"], "the stale entry must still fill the wall"
+    assert body["from_cache"] is True
+    assert body["units_spent_today"] == 0
+    assert asyncio.run(budget.spent(store)) == 0
 
 
 def test_no_query_serves_the_shared_config_query(app_env):
@@ -1021,6 +1040,32 @@ def test_new_query_passes_the_clients_history_to_gemini(generating_env, monkeypa
     with TestClient(app) as client:
         client.post("/api/new-query", json={"history": ["a", "b"]})
     assert seen["history"] == ["a", "b"]
+
+
+def test_avoid_repeats_of_zero_means_no_avoid_list(generating_env, monkeypatch):
+    """`history[-0:]` is `history[0:]` -- the WHOLE list. Setting avoid_repeats
+    to 0 must mean "do not avoid repeats", not "avoid every query this browser
+    has ever stored", which is what the naive slice does."""
+    app, default_path, _ = generating_env
+    default_path.write_text(
+        yaml.safe_dump(
+            {
+                **GENERATING,
+                "query_generation": {**GENERATING["query_generation"], "avoid_repeats": 0},
+            }
+        )
+    )
+    stub_search(monkeypatch)
+    seen = {}
+
+    async def capture(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        seen["avoid"] = list(avoid)
+        return "invented"
+
+    monkeypatch.setattr(gemini, "generate_query", capture)
+    with TestClient(app) as client:
+        client.post("/api/new-query", json={"history": ["a", "b", "c"]})
+    assert seen["avoid"] == []
 
 
 def test_new_query_tolerates_a_missing_history(generating_env, monkeypatch):

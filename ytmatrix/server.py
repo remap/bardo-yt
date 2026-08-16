@@ -258,8 +258,8 @@ def create_app(
     async def shared_config() -> Config:
         return await load_config(store, default_path=default_config_path)
 
-    async def usable_query(config: Config, query: str | None) -> str:
-        """Which query to actually put on the wall.
+    async def usable_query(config: Config, query: str | None) -> tuple[str, list[dict] | None]:
+        """Which query to put on the wall, and the cached results to serve it.
 
         A query supplied by the browser is honoured only if the shared cache
         already has it -- stale included. The browser replays whatever is in
@@ -271,12 +271,29 @@ def create_app(
         Stale counts as known on purpose. Expiry must not quietly move
         somebody's wall back to the shared query -- the ids are the same ones
         they were already watching.
+
+        The items come back with the decision rather than being looked up
+        again downstream, and that is the whole point of the return shape.
+        Re-reading would apply the TTL a second time, and an expired entry
+        would miss and fall through to a search -- so a client query would be
+        free only until it aged out, and a connection that flaps after that
+        would cost 100 units a reconnect, per user. Handing the items over
+        makes searching structurally impossible on this path rather than
+        merely unintended.
+
+        The consequence, accepted deliberately: a client query's results are
+        never refreshed on expiry. The query is fixed until someone presses
+        New query, and re-running the same search buys a slightly different
+        fifty videos for 100 units -- a bad trade. The fallback path (no
+        client query, or an unknown one) is unchanged and still refreshes.
         """
         if not query:
-            return config.query
+            return config.query, None
         params = search_params_for(config, query)
         cached = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
-        return query if cached is not None else config.query
+        if cached is None:
+            return config.query, None
+        return query, cached
 
     async def videos_for(
         config: Config,
@@ -285,24 +302,34 @@ def create_app(
         source: str,
         email: str,
         prompt: str | None = None,
+        cached: list[dict] | None = None,
     ) -> dict:
-        try:
-            resolved = await resolve_videos(
-                config,
-                store,
-                settings.youtube_api_key,
-                query,
-                global_limit_units=settings.global_daily_units,
-            )
-        except BudgetExceededError as exc:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        except youtube.QuotaExceededError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="YouTube API daily quota exceeded and no cached results are available.",
-            ) from exc
-        except youtube.SearchError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if cached is not None:
+            # A query the caller supplied that the shared cache already holds.
+            # Served from what usable_query found and never re-resolved, so
+            # this branch cannot reach youtube.search at all -- see the note
+            # in usable_query about why the items travel with the decision.
+            resolved = {"items": cached, "from_cache": True, "note": None}
+        else:
+            try:
+                resolved = await resolve_videos(
+                    config,
+                    store,
+                    settings.youtube_api_key,
+                    query,
+                    global_limit_units=settings.global_daily_units,
+                )
+            except BudgetExceededError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            except youtube.QuotaExceededError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "YouTube API daily quota exceeded and no cached results are available."
+                    ),
+                ) from exc
+            except youtube.SearchError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         video_ids = [item["video_id"] for item in resolved["items"]]
         selection = await select_videos(config, video_ids, store, settings.youtube_api_key)
@@ -394,12 +421,15 @@ def create_app(
     @app.get("/api/videos")
     async def get_videos(request: Request, query: str | None = None) -> dict:
         config = await shared_config()
-        chosen = await usable_query(config, query)
+        chosen, cached = await usable_query(config, query)
         return await videos_for(
             config,
             chosen,
-            source="client" if query and chosen == query else "config",
+            # `cached` is non-None exactly when the caller's own query was
+            # honoured, so it is also the answer to "where did this come from".
+            source="client" if cached is not None else "config",
             email=user_of(request),
+            cached=cached,
         )
 
     @app.get("/api/content-box/{video_id}")
@@ -482,11 +512,17 @@ def create_app(
         # request rather than being read from disk.
         raw_history = payload.get("history")
         history = [str(q) for q in raw_history] if isinstance(raw_history, list) else []
+        # Guarded, not sliced directly: `history[-0:]` is `history[0:]`, the
+        # whole list -- so a config of 0, which means "do not avoid repeats",
+        # would hand Gemini maximum avoidance and a prompt carrying every
+        # query this browser has ever stored.
+        keep = config.query_generation.avoid_repeats
+        avoid = history[-keep:] if keep else []
 
         try:
             query = await gemini.generate_query(
                 config.query_generation.theme,
-                history[-config.query_generation.avoid_repeats :],
+                avoid,
                 config.query_generation.model,
                 settings.gemini_api_key,
                 instruction=prompt,
