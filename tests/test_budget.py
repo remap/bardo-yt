@@ -72,31 +72,42 @@ async def test_global_cap_refuses_even_when_user_limit_is_huge(store):
 
 
 async def test_user_limit_can_still_lower_the_ceiling(store):
-    await store.put(budget.LEDGER_KEY, json.dumps({"date": "2026-08-16", "units": 400}).encode())
+    """A user's own limit refuses even when the global cap would allow it.
+
+    450 spent + this search = 550, which crosses the user's 500 limit even
+    though it is nowhere near the 10,000 global cap -- the user ceiling is
+    enforced on its own, not just as a fallback once the global one trips.
+    """
+    await store.put(budget.LEDGER_KEY, json.dumps({"date": "2026-08-16", "units": 450}).encode())
     assert (
         await budget.would_exceed(store, 500, global_limit_units=10_000, today="2026-08-16") is True
     )
 
 
-async def test_concurrent_records_do_not_lose_increments(store):
-    """The ledger is the one piece of state with many writers -- every user's
-    container spends from it. A lost update silently hands back quota Google
-    has not refilled."""
-    import asyncio
+async def test_landing_exactly_on_the_limit_is_allowed(store):
+    """The boundary is exclusive: only going *past* a ceiling refuses.
 
-    await asyncio.gather(*(budget.record_search(store, today="2026-08-16") for _ in range(5)))
-    assert await budget.spent(store, today="2026-08-16") == 500
+    400 spent + this search = exactly 500, the user's limit. Nothing has
+    been spent that the limit doesn't cover, so this must be allowed. Under
+    a `>=` comparison this would wrongly refuse -- which would look like
+    conservative correctness while actually discarding a full search's
+    worth of the scarcest resource this app has, every single day.
+    """
+    await store.put(budget.LEDGER_KEY, json.dumps({"date": "2026-08-16", "units": 400}).encode())
+    assert (
+        await budget.would_exceed(store, 500, global_limit_units=10_000, today="2026-08-16")
+        is False
+    )
 
 
 class _LosesFirstRace:
     """Wraps a Store and makes its first `put_if_version` call lose a race.
 
     `FileStore.get`/`put` never actually suspend -- there is no real disk
-    I/O yield point in this test process -- so `asyncio.gather` over several
-    `record_search` calls runs them one at a time with no interleaving.
-    `test_concurrent_records_do_not_lose_increments` above therefore passes
-    even against a plain read-modify-write with no CAS at all: nothing ever
-    races. This wrapper manufactures the race `record_search` is written to
+    I/O yield point in this test process -- so calling `record_search`
+    several times through `asyncio.gather` runs them one at a time with no
+    interleaving: nothing ever races, so nothing exercises the retry loop.
+    This wrapper manufactures the race `record_search` is written to
     survive, by applying a rival write between the read and the write of the
     first attempt and reporting that attempt as lost, exactly what a genuine
     concurrent writer winning `put_if_version` looks like from the caller's

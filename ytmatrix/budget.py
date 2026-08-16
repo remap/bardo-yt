@@ -94,14 +94,17 @@ async def would_exceed(
     each believe they had the whole thing and turn this graceful refusal into
     a hard 403 quotaExceeded.
 
-    The comparison is `>=`, not `>`: a search that would land exactly on the
-    ceiling still refuses, because "at the ceiling" already means the next
-    search after this one has nothing left -- it should not take one more
-    just because it lands precisely on the line.
+    The comparison is `>`, not `>=`: landing exactly on a ceiling is still
+    allowed, only going past it is not. Under `>=` a 10,000-unit daily limit
+    would permit only 99 searches, not 100 -- the search that lands exactly
+    on 10,000 would be refused even though nothing has actually been spent
+    that Google hasn't granted. That silently discards a real search's worth
+    of the scarcest resource this app has, and it would look like conservative
+    correctness, which is what makes it worth spelling out here.
     """
     used = await spent(store, today=today)
-    if used + SEARCH_COST_UNITS >= global_limit_units:
+    if used + SEARCH_COST_UNITS > global_limit_units:
         return True
     if limit_units <= 0:
         return False
-    return used + SEARCH_COST_UNITS >= limit_units
+    return used + SEARCH_COST_UNITS > limit_units
