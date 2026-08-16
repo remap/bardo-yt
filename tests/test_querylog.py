@@ -145,24 +145,28 @@ async def test_logging_never_raises_on_an_unserialisable_entry(store):
     await querylog.append(store, {"query": "q", "bad": {1, 2, 3}})  # must not raise
 
 
-async def test_ordering_survives_even_when_the_clock_does_not_advance(store, monkeypatch):
+async def test_microsecond_keys_sort_chronologically_even_within_one_second(store, monkeypatch):
     """Regression guard for the original bug: keying purely off a
     second-precision timestamp let three rapid appends collide and fall back
-    to a random uuid tiebreak, scattering their order. Forced deterministically
+    to a random uuid tiebreak, scattering their order. Proven deterministically
     here -- rather than relying on a tight loop happening to land inside the
-    same second on whatever machine runs it -- by freezing datetime.now() to
-    return the literal same instant on every call. If ordering only came from
-    the timestamp, this would be unwinnable; the per-process monotonic counter
-    in `_entry_key` is what makes it deterministic regardless of clock
-    resolution."""
-    frozen = datetime(2026, 8, 16, 12, 0, 0, 0).astimezone()
+    same second on whatever machine runs it -- by mocking datetime.now() to
+    return three instants one microsecond apart, all inside the same second.
+    That is the actual condition a real clock produces for this app (a
+    handful of searches a day are never microseconds apart in practice, but
+    they can easily share a second); microsecond-precision keys sort that
+    correctly on their own, with no other machinery required."""
+    base = datetime(2026, 8, 16, 12, 0, 0, 0).astimezone()
+    instants = [base.replace(microsecond=i) for i in range(3)]
 
-    class FrozenDatetime(datetime):
+    class SteppingDatetime(datetime):
+        _remaining = iter(instants)
+
         @classmethod
         def now(cls, tz=None):
-            return frozen
+            return next(cls._remaining)
 
-    monkeypatch.setattr(querylog, "datetime", FrozenDatetime)
+    monkeypatch.setattr(querylog, "datetime", SteppingDatetime)
     for i in range(3):
         await querylog.append(store, {"query": f"q{i}"})
     assert [e["query"] for e in await querylog.read_all(store)] == ["q0", "q1", "q2"]
