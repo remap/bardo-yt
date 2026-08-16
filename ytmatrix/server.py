@@ -89,10 +89,11 @@ async def motion_score(video_id: str, store: Store, client: httpx.AsyncClient) -
     if raw is not None:
         try:
             cached = json.loads(raw)["score"]
-        except (json.JSONDecodeError, KeyError, TypeError):
-            pass  # Re-measure rather than fail.
+            result = motion.UNKNOWN_SCORE if cached is None else float(cached)
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            pass  # Re-measure rather than fail -- a corrupt entry is a miss.
         else:
-            return motion.UNKNOWN_SCORE if cached is None else float(cached)
+            return result
 
     async def frame(index: int) -> bytes | None:
         try:
