@@ -100,7 +100,9 @@ def build_entry(
     without having to re-query YouTube months later."""
     entry = {
         "query": query,
-        # "generated" | "manual" | "config" -- where the query came from.
+        # Where the query came from: "generated" (Gemini invented it),
+        # "manual" (Gemini, steered by a typed prompt), "client" (the browser
+        # replayed the one it had stored) or "config" (the shared config's own).
         "source": source,
         "from_cache": from_cache,
         "count": len(video_ids),

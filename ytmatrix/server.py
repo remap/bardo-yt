@@ -5,9 +5,7 @@ import json
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from ytmatrix import (
@@ -20,12 +18,10 @@ from ytmatrix import (
     querylog,
     youtube,
 )
-from ytmatrix.config import Config, load_config, merge_config, save_config
+from ytmatrix.config import DEFAULT_CONFIG_PATH, Config, load_config, merge_config, save_config
 from ytmatrix.settings import Settings
-from ytmatrix.store import FileStore, Store
+from ytmatrix.store import Store
 from ytmatrix.ws import ConnectionManager
-
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 
 
 class BudgetExceededError(RuntimeError):
@@ -44,7 +40,12 @@ def search_params_for(config: Config, query: str | None = None) -> dict[str, str
 
 
 async def resolve_videos(
-    config: Config, store: Store, api_key: str, query: str | None = None
+    config: Config,
+    store: Store,
+    api_key: str,
+    query: str | None = None,
+    *,
+    global_limit_units: int = budget.DAILY_QUOTA_UNITS,
 ) -> dict:
     """Return the video list for this config, spending quota only when required."""
     params = search_params_for(config, query)
@@ -54,7 +55,11 @@ async def resolve_videos(
         return {"items": items, "from_cache": True, "note": None}
 
     # Checked before the call, not after: the point is to not spend the unit.
-    if await budget.would_exceed(store, config.quota.daily_limit_units):
+    # Two ceilings: the shared config's, which any user can lower, and the
+    # project-wide one, which none of them can raise.
+    if await budget.would_exceed(
+        store, config.quota.daily_limit_units, global_limit_units=global_limit_units
+    ):
         stale = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
         if stale is not None:
             return {"items": stale, "from_cache": True, "note": "budget_exceeded_stale"}
@@ -212,8 +217,10 @@ async def select_videos(
 
 
 def videos_message(
-    config: Config, resolved: dict, query: str, cache_dir: Path, selection: dict
+    config: Config, resolved: dict, query: str, selection: dict, units_spent_today: int
 ) -> dict:
+    """Shape one resolved set for the wire. Pure -- the spend is passed in
+    rather than read, so this stays synchronous for one number."""
     items = resolved["items"]
     note = resolved["note"] or ("no_results" if not items else None)
     return {
@@ -225,37 +232,68 @@ def videos_message(
         "from_cache": resolved["from_cache"],
         "note": note,
         "static_relaxed": selection["relaxed"],
-        "units_spent_today": budget.spent(cache_dir),
+        "units_spent_today": units_spent_today,
         "daily_limit_units": config.quota.daily_limit_units,
     }
 
 
 def create_app(
-    config_path: Path, cache_dir: Path, settings: Settings, log_dir: Path | None = None
+    store: Store,
+    settings: Settings,
+    *,
+    default_config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> FastAPI:
     app = FastAPI(title="yt matrix")
     manager = ConnectionManager()
-    log_dir = log_dir if log_dir is not None else config_path.parent / "logs"
 
-    # The query actually on the wall, restored from disk so a restart or a
-    # reload keeps showing what it was showing -- reloads are free, and only an
-    # explicit "New" spends quota. Kept out of config.yaml: writing every
-    # generated query to a committed file would churn git constantly, and the
-    # file's `query` field stays meaningful as the manual fallback.
-    state: dict = wallstate.load(cache_dir)  # noqa: F821 - deleted in Task 4; call site removed in Task 6
+    def user_of(request: Request) -> str:
+        """Who is asking, for the query log and nothing else.
 
-    def effective_query(config: Config) -> str:
-        return state["query"] or config.query
+        Set by the Worker after it validated the Access JWT. Nothing branches
+        on it: config is shared and the current query lives in the caller's
+        own browser, so the server has no per-user state to look up.
+        """
+        return (request.headers.get("x-wall-user") or "").strip().lower()
 
-    async def current_videos(source: str | None = None, prompt: str | None = None) -> dict:
-        config = load_config(config_path)
-        query = effective_query(config)
-        # Every resolution is logged, including plain reloads: the log is a
-        # record of what was on the wall and when, not just of what was newly
-        # searched. `from_cache` distinguishes the two.
-        source = source or ("generated" if state["query"] else "config")
+    async def shared_config() -> Config:
+        return await load_config(store, default_path=default_config_path)
+
+    async def usable_query(config: Config, query: str | None) -> str:
+        """Which query to actually put on the wall.
+
+        A query supplied by the browser is honoured only if the shared cache
+        already has it -- stale included. The browser replays whatever is in
+        its localStorage on every load and every WebSocket reconnect, and a
+        cache miss there must never become a 100-unit search: spending is the
+        New query button's job and nothing else's (gotcha 2). An unknown query
+        silently falls back to the shared config query.
+
+        Stale counts as known on purpose. Expiry must not quietly move
+        somebody's wall back to the shared query -- the ids are the same ones
+        they were already watching.
+        """
+        if not query:
+            return config.query
+        params = search_params_for(config, query)
+        cached = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
+        return query if cached is not None else config.query
+
+    async def videos_for(
+        config: Config,
+        query: str,
+        *,
+        source: str,
+        email: str,
+        prompt: str | None = None,
+    ) -> dict:
         try:
-            resolved = await resolve_videos(config, cache_dir, settings.youtube_api_key, query)
+            resolved = await resolve_videos(
+                config,
+                store,
+                settings.youtube_api_key,
+                query,
+                global_limit_units=settings.global_daily_units,
+            )
         except BudgetExceededError as exc:
             raise HTTPException(status_code=429, detail=str(exc)) from exc
         except youtube.QuotaExceededError as exc:
@@ -265,12 +303,16 @@ def create_app(
             ) from exc
         except youtube.SearchError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
-        video_ids = [item["video_id"] for item in resolved["items"]]
-        selection = await select_videos(config, video_ids, cache_dir, settings.youtube_api_key)
-        message = videos_message(config, resolved, query, cache_dir, selection)
 
-        querylog.append(
-            log_dir,
+        video_ids = [item["video_id"] for item in resolved["items"]]
+        selection = await select_videos(config, video_ids, store, settings.youtube_api_key)
+        message = videos_message(config, resolved, query, selection, await budget.spent(store))
+
+        # Every resolution is logged, including plain reloads: the log is a
+        # record of what was on the wall and when, not just of what was newly
+        # searched. `from_cache` distinguishes the two.
+        await querylog.append(
+            store,
             querylog.build_entry(
                 query=query,
                 source=source,
@@ -283,6 +325,7 @@ def create_app(
                 prompt=prompt,
                 note=message["note"],
             ),
+            email=email,
         )
         return message
 
@@ -290,21 +333,13 @@ def create_app(
     async def healthz() -> dict:
         return {"status": "ok"}
 
-    @app.get("/")
-    async def player_page() -> FileResponse:
-        return FileResponse(STATIC_DIR / "player.html")
-
-    @app.get("/config")
-    async def config_page() -> FileResponse:
-        return FileResponse(STATIC_DIR / "config.html")
-
     @app.get("/api/config")
     async def get_config() -> dict:
-        return load_config(config_path).model_dump(mode="json")
+        return (await shared_config()).model_dump(mode="json")
 
     @app.put("/api/config")
     async def put_config(payload: dict) -> dict:
-        previous = load_config(config_path)
+        previous = await shared_config()
         try:
             # Merged, not replaced: an omitted section means "leave it alone".
             # Validating the payload alone would reset every section the
@@ -321,23 +356,14 @@ def create_app(
                 detail=exc.errors(include_url=False, include_context=False),
             ) from exc
 
-        save_config(new_config, config_path)
+        await save_config(new_config, store)
 
-        # Typing a query by hand is an override: it must beat whatever Gemini
-        # last generated, or the config page would appear to do nothing.
-        if previous.query != new_config.query:
-            state["query"] = None
-            wallstate.save(cache_dir, state)  # noqa: F821 - deleted in Task 4; call site removed in Task 6
-
+        # Config only. The server cannot broadcast a video set any more: it does
+        # not know what query any given browser is watching -- that lives in
+        # each browser's own localStorage. Each client decides for itself
+        # whether the change means it has to refetch, and whether a hand-typed
+        # config query should override the one it had stored.
         await manager.broadcast({"type": "config", "config": new_config.model_dump(mode="json")})
-
-        # Only a change to the search parameters can change the video set.
-        # Cosmetic edits must not tear down eight running players.
-        if search_params_for(previous) != search_params_for(new_config) or (
-            previous.grid.cells != new_config.grid.cells
-        ):
-            await manager.broadcast(await current_videos())
-
         return {"status": "ok"}
 
     @app.post("/api/cache-status")
@@ -346,7 +372,7 @@ def create_app(
             # Same merge as the PUT, so the quota indicator predicts what
             # saving would actually do rather than what the payload says.
             candidate = Config.model_validate(
-                merge_config(load_config(config_path).model_dump(mode="json"), payload)
+                merge_config((await shared_config()).model_dump(mode="json"), payload)
             )
         except ValidationError as exc:
             # include_context=False matters: the context of a custom validator
@@ -357,17 +383,24 @@ def create_app(
                 detail=exc.errors(include_url=False, include_context=False),
             ) from exc
         params = search_params_for(candidate)
-        hit = cache.read(cache_dir, params, candidate.cache.ttl_hours) is not None
+        hit = await cache.read(store, params, candidate.cache.ttl_hours) is not None
         return {
             "would_hit": hit,
             "quota_cost": 0 if hit else budget.SEARCH_COST_UNITS,
-            "units_spent_today": budget.spent(cache_dir),
+            "units_spent_today": await budget.spent(store),
             "daily_limit_units": candidate.quota.daily_limit_units,
         }
 
     @app.get("/api/videos")
-    async def get_videos() -> dict:
-        return await current_videos()
+    async def get_videos(request: Request, query: str | None = None) -> dict:
+        config = await shared_config()
+        chosen = await usable_query(config, query)
+        return await videos_for(
+            config,
+            chosen,
+            source="client" if query and chosen == query else "config",
+            email=user_of(request),
+        )
 
     @app.get("/api/content-box/{video_id}")
     async def content_box(video_id: str) -> dict:
@@ -376,10 +409,6 @@ def create_app(
         Thumbnails come from i.ytimg.com, which is not the Data API and costs
         no quota. Results are cached forever: a video's shape never changes.
         """
-        # A FileStore is just a wrapper around cache_dir -- cheap to build per
-        # request. `create_app` itself still takes `cache_dir`, not `store`;
-        # that wiring is Task 6's job.
-        store: Store = FileStore(cache_dir)
         raw = await store.get(f"contentbox/{video_id}.json")
         if raw is not None:
             try:
@@ -404,8 +433,8 @@ def create_app(
         return box
 
     @app.post("/api/new-query")
-    async def new_query(payload: dict | None = None) -> dict:
-        """Invent a fresh query with Gemini and put it on the wall.
+    async def new_query(request: Request, payload: dict | None = None) -> dict:
+        """Invent a fresh query with Gemini and return it to the caller.
 
         An optional `prompt` is the operator's steer -- a metaprompt, not a
         raw query. It goes to Gemini together with the app's standing guidance
@@ -416,12 +445,17 @@ def create_app(
         Never called implicitly: only the New query button, ?new=true, or the
         prompt box. A generated query is a cache miss by definition and costs
         100 units.
+
+        The result is returned, not broadcast. Config is shared but walls are
+        not -- the caller stores this query in its own localStorage and nobody
+        else's wall moves.
         """
-        raw_prompt = (payload or {}).get("prompt")
+        payload = payload or {}
+        raw_prompt = payload.get("prompt")
         # Whitespace-only is no prompt at all -- normalise to None so "manual"
         # never gets recorded for an empty box.
         prompt = raw_prompt.strip() or None if isinstance(raw_prompt, str) else None
-        config = load_config(config_path)
+        config = await shared_config()
         if not config.query_generation.enabled:
             raise HTTPException(status_code=409, detail="query_generation.enabled is false")
         if not settings.gemini_api_key:
@@ -431,19 +465,28 @@ def create_app(
         # Refuse before calling Gemini, not after: a generated query is a cache
         # miss by definition, so generating one we cannot then search for wastes
         # a Gemini call and leaves the wall unchanged anyway.
-        if budget.would_exceed(cache_dir, config.quota.daily_limit_units):
+        if await budget.would_exceed(
+            store,
+            config.quota.daily_limit_units,
+            global_limit_units=settings.global_daily_units,
+        ):
             raise HTTPException(
                 status_code=429,
                 detail=(
                     f"daily search budget of {config.quota.daily_limit_units} units is spent "
-                    f"({budget.spent(cache_dir)} used); keeping the current query."
+                    f"({await budget.spent(store)} used); keeping the current query."
                 ),
             )
+
+        # The avoid-list lives in the caller's browser now, so it arrives on the
+        # request rather than being read from disk.
+        raw_history = payload.get("history")
+        history = [str(q) for q in raw_history] if isinstance(raw_history, list) else []
 
         try:
             query = await gemini.generate_query(
                 config.query_generation.theme,
-                state["history"][-config.query_generation.avoid_repeats :],
+                history[-config.query_generation.avoid_repeats :],
                 config.query_generation.model,
                 settings.gemini_api_key,
                 instruction=prompt,
@@ -451,12 +494,13 @@ def create_app(
         except gemini.QueryGenerationError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        state["query"] = query
-        state["history"].append(query)
-        wallstate.save(cache_dir, state)  # noqa: F821 - deleted in Task 4; call site removed in Task 6
-        message = await current_videos(source="manual" if prompt else "generated", prompt=prompt)
-        await manager.broadcast(message)
-        return message
+        return await videos_for(
+            config,
+            query,
+            source="manual" if prompt else "generated",
+            email=user_of(request),
+            prompt=prompt,
+        )
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -467,8 +511,5 @@ def create_app(
                 await websocket.receive_text()
         except WebSocketDisconnect:
             manager.disconnect(websocket)
-
-    if STATIC_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     return app

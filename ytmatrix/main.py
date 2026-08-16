@@ -4,10 +4,12 @@ import os
 from pathlib import Path
 
 import uvicorn
+from fastapi.staticfiles import StaticFiles
 
 from ytmatrix.certs import ensure_cert, mkcert_ca_installed
 from ytmatrix.server import create_app
 from ytmatrix.settings import Settings
+from ytmatrix.store import FileStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -36,11 +38,17 @@ def main() -> None:
     )
 
     app = create_app(
-        config_path=Path(os.environ.get("YTMATRIX_CONFIG_PATH", REPO_ROOT / "config.yaml")),
-        cache_dir=Path(os.environ.get("YTMATRIX_CACHE_DIR", REPO_ROOT / "cache")),
+        store=FileStore(Path(os.environ.get("YTMATRIX_CACHE_DIR", REPO_ROOT / "cache"))),
         settings=settings,
-        log_dir=Path(os.environ.get("YTMATRIX_LOG_DIR", REPO_ROOT / "logs")),
+        default_config_path=Path(os.environ.get("YTMATRIX_CONFIG_PATH", REPO_ROOT / "config.yaml")),
     )
+
+    # Local development only. In production the Worker's asset binding serves
+    # these and the container never sees the request.
+    dist = REPO_ROOT / "dist"
+    if dist.is_dir():
+        app.mount("/", StaticFiles(directory=dist, html=True), name="dist")
+
     uvicorn.run(
         app,
         host=settings.host,
