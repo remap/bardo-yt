@@ -242,7 +242,7 @@ def create_app(
     # explicit "New" spends quota. Kept out of config.yaml: writing every
     # generated query to a committed file would churn git constantly, and the
     # file's `query` field stays meaningful as the manual fallback.
-    state: dict = wallstate.load(cache_dir)
+    state: dict = wallstate.load(cache_dir)  # noqa: F821 - deleted in Task 4; call site removed in Task 6
 
     def effective_query(config: Config) -> str:
         return state["query"] or config.query
@@ -327,7 +327,7 @@ def create_app(
         # last generated, or the config page would appear to do nothing.
         if previous.query != new_config.query:
             state["query"] = None
-            wallstate.save(cache_dir, state)
+            wallstate.save(cache_dir, state)  # noqa: F821 - deleted in Task 4; call site removed in Task 6
 
         await manager.broadcast({"type": "config", "config": new_config.model_dump(mode="json")})
 
@@ -453,7 +453,7 @@ def create_app(
 
         state["query"] = query
         state["history"].append(query)
-        wallstate.save(cache_dir, state)
+        wallstate.save(cache_dir, state)  # noqa: F821 - deleted in Task 4; call site removed in Task 6
         message = await current_videos(source="manual" if prompt else "generated", prompt=prompt)
         await manager.broadcast(message)
         return message
