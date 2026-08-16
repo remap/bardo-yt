@@ -23,6 +23,7 @@ from ytmatrix import (
 )
 from ytmatrix.config import Config, load_config, merge_config, save_config
 from ytmatrix.settings import Settings
+from ytmatrix.store import FileStore, Store
 from ytmatrix.ws import ConnectionManager
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
@@ -44,52 +45,54 @@ def search_params_for(config: Config, query: str | None = None) -> dict[str, str
 
 
 async def resolve_videos(
-    config: Config, cache_dir: Path, api_key: str, query: str | None = None
+    config: Config, store: Store, api_key: str, query: str | None = None
 ) -> dict:
     """Return the video list for this config, spending quota only when required."""
     params = search_params_for(config, query)
 
-    items = cache.read(cache_dir, params, config.cache.ttl_hours)
+    items = await cache.read(store, params, config.cache.ttl_hours)
     if items is not None:
         return {"items": items, "from_cache": True, "note": None}
 
     # Checked before the call, not after: the point is to not spend the unit.
-    if budget.would_exceed(cache_dir, config.quota.daily_limit_units):
-        stale = cache.read(cache_dir, params, config.cache.ttl_hours, allow_stale=True)
+    if await budget.would_exceed(store, config.quota.daily_limit_units):
+        stale = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
         if stale is not None:
             return {"items": stale, "from_cache": True, "note": "budget_exceeded_stale"}
         raise BudgetExceededError(
             f"daily search budget of {config.quota.daily_limit_units} units is spent "
-            f"({budget.spent(cache_dir)} used). Raise quota.daily_limit_units to continue."
+            f"({await budget.spent(store)} used). Raise quota.daily_limit_units to continue."
         )
 
     try:
         items = await youtube.search(params, api_key)
     except youtube.QuotaExceededError:
         # Expired-but-present beats blank: keep the wall showing something.
-        stale = cache.read(cache_dir, params, config.cache.ttl_hours, allow_stale=True)
+        stale = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
         if stale is None:
             raise
         return {"items": stale, "from_cache": True, "note": "quota_exceeded_stale"}
 
-    budget.record_search(cache_dir)
-    cache.write(cache_dir, params, items)
+    await budget.record_search(store)
+    await cache.write(store, params, items)
     return {"items": items, "from_cache": False, "note": None}
 
 
-async def motion_score(video_id: str, cache_dir: Path, client: httpx.AsyncClient) -> float:
-    """Storyboard-frame motion score for one video, cached forever on disk.
+async def motion_score(video_id: str, store: Store, client: httpx.AsyncClient) -> float:
+    """Storyboard-frame motion score for one video, cached forever.
 
     A video's shape never changes, and these thumbnails are not the Data API,
     so this costs no quota -- only three small image fetches, once per video.
     """
-    store = cache_dir / "motion"
-    entry = store / f"{video_id}.json"
-    if entry.exists():
+    key = f"motion/{video_id}.json"
+    raw = await store.get(key)
+    if raw is not None:
         try:
-            return float(json.loads(entry.read_text())["score"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
+            cached = json.loads(raw)["score"]
+        except (json.JSONDecodeError, KeyError, TypeError):
             pass  # Re-measure rather than fail.
+        else:
+            return motion.UNKNOWN_SCORE if cached is None else float(cached)
 
     async def frame(index: int) -> bytes | None:
         try:
@@ -103,14 +106,14 @@ async def motion_score(video_id: str, cache_dir: Path, client: httpx.AsyncClient
     fetched = await asyncio.gather(*(frame(i) for i in motion.STORYBOARD_INDICES))
     score = motion.score_frames([f for f in fetched if f])
 
-    store.mkdir(parents=True, exist_ok=True)
-    tmp = entry.with_name(entry.name + ".tmp")
-    tmp.write_text(json.dumps({"score": score if score != motion.UNKNOWN_SCORE else None}))
-    tmp.replace(entry)
+    await store.put(
+        key,
+        json.dumps({"score": score if score != motion.UNKNOWN_SCORE else None}).encode("utf-8"),
+    )
     return score
 
 
-async def video_countries(video_ids: list[str], cache_dir: Path, api_key: str) -> dict[str, str]:
+async def video_countries(video_ids: list[str], store: Store, api_key: str) -> dict[str, str]:
     """video id -> ISO country, for the ids we can resolve.
 
     Two batched calls at 1 unit each, versus 100 for the search itself.
@@ -118,18 +121,17 @@ async def video_countries(video_ids: list[str], cache_dir: Path, api_key: str) -
     Any failure returns what it has: diversity is a preference, not a
     requirement, and must never stop the wall from resolving.
     """
-    store = cache_dir / "origin"
     known: dict[str, str] = {}
     missing: list[str] = []
     for video_id in video_ids:
-        entry = store / f"{video_id}.json"
-        if entry.exists():
+        raw = await store.get(f"origin/{video_id}.json")
+        if raw is not None:
             try:
-                country = json.loads(entry.read_text()).get("country")
+                country = json.loads(raw).get("country")
                 if country:
                     known[video_id] = country
                 continue
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, TypeError):
                 pass
         missing.append(video_id)
 
@@ -167,19 +169,15 @@ async def video_countries(video_ids: list[str], cache_dir: Path, api_key: str) -
     except httpx.HTTPError:
         return known
 
-    store.mkdir(parents=True, exist_ok=True)
     for video_id, country in resolved.items():
-        entry = store / f"{video_id}.json"
-        tmp = entry.with_name(entry.name + ".tmp")
-        tmp.write_text(json.dumps({"country": country}))
-        tmp.replace(entry)
+        await store.put(f"origin/{video_id}.json", json.dumps({"country": country}).encode("utf-8"))
         if country:
             known[video_id] = country
     return known
 
 
 async def select_videos(
-    config: Config, video_ids: list[str], cache_dir: Path, api_key: str = ""
+    config: Config, video_ids: list[str], store: Store, api_key: str = ""
 ) -> dict:
     """Order the results so the wall shows things that move, from many places."""
     if not video_ids:
@@ -189,7 +187,7 @@ async def select_videos(
     # given among the videos it keeps, so spreading countries here survives
     # the static filter rather than being undone by it.
     if config.filtering.prefer_country_diversity and api_key:
-        countries = await video_countries(video_ids, cache_dir, api_key)
+        countries = await video_countries(video_ids, store, api_key)
         video_ids = origin.diversify([(v, countries.get(v)) for v in video_ids])
 
     if not config.filtering.skip_static:
@@ -202,7 +200,7 @@ async def select_videos(
     head, tail = video_ids[:depth], video_ids[depth:]
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        scores = await asyncio.gather(*(motion_score(v, cache_dir, client) for v in head))
+        scores = await asyncio.gather(*(motion_score(v, store, client) for v in head))
 
     result = motion.rank(
         list(zip(head, scores, strict=True)),
@@ -376,14 +374,17 @@ def create_app(
         """Where the actual picture sits inside this video's 16:9 frame.
 
         Thumbnails come from i.ytimg.com, which is not the Data API and costs
-        no quota. Results are cached on disk: a video's shape never changes.
+        no quota. Results are cached forever: a video's shape never changes.
         """
-        box_cache = cache_dir / "content-boxes"
-        cached = box_cache / f"{video_id}.json"
-        if cached.exists():
+        # A FileStore is just a wrapper around cache_dir -- cheap to build per
+        # request. `create_app` itself still takes `cache_dir`, not `store`;
+        # that wiring is Task 6's job.
+        store: Store = FileStore(cache_dir)
+        raw = await store.get(f"contentbox/{video_id}.json")
+        if raw is not None:
             try:
-                return json.loads(cached.read_text())
-            except (json.JSONDecodeError, OSError):
+                return json.loads(raw)
+            except json.JSONDecodeError:
                 pass  # Re-fetch rather than fail.
 
         url = letterbox.THUMBNAIL_URL.format(video_id=video_id)
@@ -399,10 +400,7 @@ def create_app(
             # A missing thumbnail is not worth failing a cell over.
             return dict(letterbox.FULL_FRAME)
 
-        box_cache.mkdir(parents=True, exist_ok=True)
-        tmp = cached.with_name(cached.name + ".tmp")
-        tmp.write_text(json.dumps(box))
-        tmp.replace(cached)
+        await store.put(f"contentbox/{video_id}.json", json.dumps(box).encode("utf-8"))
         return box
 
     @app.post("/api/new-query")

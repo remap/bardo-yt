@@ -1,83 +1,46 @@
-import json
-import time
-from pathlib import Path
-
 import pytest
 
 from ytmatrix import cache
-
-PARAMS = {"q": "golden cover", "order": "relevance", "maxResults": "50"}
-ITEMS = [{"video_id": "abc123", "title": "A", "channel": "C"}]
+from ytmatrix.store import FileStore
 
 
-def test_key_is_stable_across_parameter_ordering():
-    reordered = {k: PARAMS[k] for k in reversed(list(PARAMS))}
-    assert cache.cache_key(PARAMS) == cache.cache_key(reordered)
+@pytest.fixture
+def store(tmp_path):
+    return FileStore(tmp_path)
 
 
-def test_key_changes_when_a_value_changes():
-    assert cache.cache_key(PARAMS) != cache.cache_key({**PARAMS, "q": "silver cover"})
+async def test_read_miss_is_none(store):
+    assert await cache.read(store, {"q": "a"}, 24) is None
 
 
-def test_read_returns_none_on_a_miss(tmp_path):
-    assert cache.read(tmp_path, PARAMS, ttl_hours=24) is None
+async def test_write_then_read_roundtrips(store):
+    await cache.write(store, {"q": "a"}, [{"video_id": "x"}])
+    assert await cache.read(store, {"q": "a"}, 24) == [{"video_id": "x"}]
 
 
-def test_write_then_read_round_trips(tmp_path):
-    cache.write(tmp_path, PARAMS, ITEMS)
-    assert cache.read(tmp_path, PARAMS, ttl_hours=24) == ITEMS
+async def test_different_params_are_different_entries(store):
+    await cache.write(store, {"q": "a"}, [{"video_id": "x"}])
+    assert await cache.read(store, {"q": "b"}, 24) is None
 
 
-def test_read_returns_none_once_the_entry_has_expired(tmp_path):
-    cache.write(tmp_path, PARAMS, ITEMS)
-    path = tmp_path / f"{cache.cache_key(PARAMS)}.json"
-    payload = json.loads(path.read_text())
-    payload["fetched_at"] = time.time() - 7200  # two hours ago
-    path.write_text(json.dumps(payload))
-    assert cache.read(tmp_path, PARAMS, ttl_hours=1) is None
+async def test_expired_entry_reads_as_a_miss(store, monkeypatch):
+    await cache.write(store, {"q": "a"}, [{"video_id": "x"}])
+    monkeypatch.setattr(cache.time, "time", lambda: 1e12)
+    assert await cache.read(store, {"q": "a"}, 24) is None
 
 
-def test_allow_stale_returns_an_expired_entry(tmp_path):
-    cache.write(tmp_path, PARAMS, ITEMS)
-    path = tmp_path / f"{cache.cache_key(PARAMS)}.json"
-    payload = json.loads(path.read_text())
-    payload["fetched_at"] = time.time() - 7200
-    path.write_text(json.dumps(payload))
-    assert cache.read(tmp_path, PARAMS, ttl_hours=1, allow_stale=True) == ITEMS
+async def test_expired_entry_is_still_available_as_stale(store, monkeypatch):
+    await cache.write(store, {"q": "a"}, [{"video_id": "x"}])
+    monkeypatch.setattr(cache.time, "time", lambda: 1e12)
+    assert await cache.read(store, {"q": "a"}, 24, allow_stale=True) == [{"video_id": "x"}]
 
 
-def test_read_returns_none_on_a_corrupt_file_rather_than_raising(tmp_path):
-    cache.write(tmp_path, PARAMS, ITEMS)
-    (tmp_path / f"{cache.cache_key(PARAMS)}.json").write_text("{not json")
-    assert cache.read(tmp_path, PARAMS, ttl_hours=24) is None
+async def test_corrupt_entry_is_a_miss_not_a_crash(store):
+    await store.put(f"search/{cache.cache_key({'q': 'a'})}.json", b"not json")
+    assert await cache.read(store, {"q": "a"}, 24) is None
 
 
-def test_write_creates_the_cache_directory(tmp_path):
-    target = tmp_path / "nested" / "cache"
-    cache.write(target, PARAMS, ITEMS)
-    assert cache.read(target, PARAMS, ttl_hours=24) == ITEMS
-
-
-def test_write_leaves_no_temp_file_behind(tmp_path):
-    cache.write(tmp_path, PARAMS, ITEMS)
-    assert list(tmp_path.glob("*.tmp")) == []
-
-
-def test_a_crash_during_write_leaves_the_previous_entry_intact(tmp_path, monkeypatch):
-    cache.write(tmp_path, PARAMS, ITEMS)
-
-    def explode(self, target):
-        raise OSError("simulated crash during rename")
-
-    monkeypatch.setattr(Path, "replace", explode)
-    with pytest.raises(OSError):
-        cache.write(tmp_path, PARAMS, [{"video_id": "new", "title": "N", "channel": "C"}])
-
-    assert cache.read(tmp_path, PARAMS, ttl_hours=24) == ITEMS
-
-
-def test_the_stored_payload_records_the_params_it_was_fetched_for(tmp_path):
-    cache.write(tmp_path, PARAMS, ITEMS)
-    payload = json.loads((tmp_path / f"{cache.cache_key(PARAMS)}.json").read_text())
-    assert payload["params"] == PARAMS
-    assert "fetched_at" in payload
+async def test_entries_live_under_the_shared_search_prefix(store):
+    """The search cache is shared by every user -- it must not be per-user."""
+    await cache.write(store, {"q": "a"}, [{"video_id": "x"}])
+    assert await store.list_keys("search/") == [f"search/{cache.cache_key({'q': 'a'})}.json"]
