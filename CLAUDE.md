@@ -159,6 +159,12 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     because rank preserves the order it is given among the videos it keeps.
     Reversing them would let the static filter undo the spread.
 
+    **Those 2 units are not in the ledger.** `budget.py` counts searches and
+    nothing else, so the status line's "units today" under-reports by 2 per
+    newly-resolved set — one more reason the number is an estimate rather than
+    a reading (gotcha 2). Not worth fixing at 2 units against 10,000; worth
+    knowing before anyone tries to reconcile the figure with Google's console.
+
 25. **Whatever the theme constrains must survive into the query.** Naming an
     artist and song without a cover word returns that act's own official
     upload — one canonical video and its neighbours, the opposite of a wall.
@@ -372,13 +378,21 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     requires Docker running, full stop.
 
 35. **An upgrade is forwarded unmodified; only HTTP gets the identity header.**
-    `worker/index.ts` branches on `upgrade: websocket` *after* verifying the
-    JWT and *before* rebuilding the headers, and hands the original Request
-    straight to the stub. The socket has no use for identity —
+    `worker/index.ts` branches on **`/ws` *and* `upgrade: websocket`** — after
+    verifying the JWT, before rebuilding the headers — and hands the original
+    Request straight to the stub. The socket has no use for identity —
     `websocket_endpoint` never reads `X-Wall-User`, and the only consumer of
     that header is the query log, written on HTTP requests — so the one path
     whose request reconstruction nothing has ever executed is also the one path
     with nothing to gain from it. Do not "unify" the two branches.
+
+    **The path half of that test is not redundant.** The header rebuild is the
+    only thing that strips a client-supplied `x-wall-user`, so whatever skips
+    it can name itself in the query log. Keyed on the header alone, a plain
+    `GET /api/videos` carrying `Upgrade: websocket` and no `Connection:
+    upgrade` opts out of sanitisation and is then handled as ordinary HTTP by
+    uvicorn (`_get_upgrade` returns None without the Connection token). Only
+    `/ws` may skip the rebuild.
 
     On both branches the stub's response is returned **unwrapped**, because
     `new Response(res.body, res)` silently drops the `webSocket` a 101 carries.

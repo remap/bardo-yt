@@ -107,7 +107,18 @@ export default {
     // `res.webSocket`, builds a WebSocketPair and pumps both directions.
     //
     // Authentication still happens first, above -- an upgrade is not exempt.
-    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+    //
+    // The PATH test is load-bearing and must not be dropped as redundant. The
+    // header rebuild below is the only thing that strips a client-supplied
+    // `x-wall-user`, so any request that skips it can name itself in the query
+    // log. On the header alone, `GET /api/videos` with `Upgrade: websocket`
+    // and no `Connection: upgrade` opts out: uvicorn treats that as ordinary
+    // HTTP -- its `_get_upgrade` returns None unless `upgrade` is among the
+    // Connection tokens -- so the request would reach `querylog.append` with
+    // an identity nobody verified. Only `/ws` may skip sanitisation, and a
+    // forged header is harmless there because `websocket_endpoint` never reads
+    // it, which is the premise this whole branch rests on.
+    if (url.pathname === "/ws" && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
       return env.WALL.getByName("wall").fetch(request);
     }
 
