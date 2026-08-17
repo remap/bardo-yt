@@ -60,7 +60,7 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 | `ytmatrix/ws.py` | `ConnectionManager` (copied from layout-driver). |
 | `ytmatrix/main.py` | Local entry point: Settings, `FileStore`, cert, uvicorn over TLS, and it serves `dist/` itself. |
 | `ytmatrix/container.py` | Cloudflare entry point: `R2Store` from env, plain HTTP on `$PORT`, no certs, no static files. |
-| `worker/index.ts` | Verifies the Access JWT, stamps `X-Wall-User`, forwards to the one shared container, serves `dist/`. `worker/env.d.ts` pins the five secrets for the typechecker. |
+| `worker/index.ts` | Verifies the Access JWT, stamps `X-Wall-User`, forwards to the one shared container. Runs only for the three routes in `run_worker_first`; `dist/` is served by the assets layer without it (gotcha 32). `worker/env.d.ts` pins the five secrets for the typechecker. |
 | `static/grid-logic.js` | Pure slot/reserve bookkeeping + config-change classification. Node-testable. |
 | `static/wallstate.js` | What *this browser* is watching: current query + history in `localStorage`. Every access is defensive. |
 | `static/socket.js` | WS connect with backoff; re-syncs on every (re)connect. |
@@ -361,7 +361,8 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 
 36. **The `# noqa: BLE001` / `# noqa: S110` directives are load-bearing.** This
     project runs ruff 0.16.2, whose default rule set is far wider than older
-    versions' — both rules genuinely fire on the four deliberate
-    catch-and-carry-on blocks in `querylog.py`, `ws.py`, `letterbox.py` and
-    `motion.py`. Deleting the directives as "dead" breaks `ruff check`. Each
-    one is followed by a reason; keep the reason with it.
+    versions'. BLE001 fires on all four deliberate catch-and-carry-on blocks —
+    `querylog.py`, `ws.py`, `letterbox.py`, `motion.py` — and S110 fires on the
+    one that is a bare `except: pass`, in `querylog.py`. Deleting either
+    directive as "dead" breaks `ruff check`. Each is followed by a reason; keep
+    the reason with it.

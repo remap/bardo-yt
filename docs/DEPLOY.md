@@ -10,15 +10,27 @@ browser ──TLS──> Cloudflare edge
                    │  Cloudflare Access checks who you are, at the edge,
                    │  before any of our code runs
                    ▼
-                 Worker (worker/index.ts)
-                   ├── verifies the Access JWT itself, a second time
-                   ├── serves dist/ (the HTML and the browser JS)
-                   └── forwards /api/*, /ws, /healthz to ...
-                         │
-                         ▼
-                       one shared container (Dockerfile → ytmatrix.container)
-                         └── all persistent state in an R2 bucket
+                 the edge splits by path, on run_worker_first:
+                   │
+                   ├── everything else ──> assets layer serves dist/
+                   │                       (the HTML and the browser JS —
+                   │                        the Worker never runs for these)
+                   │
+                   └── /api/*, /ws, /healthz ──> Worker (worker/index.ts)
+                         ├── verifies the Access JWT itself, a second time
+                         ├── stamps X-Wall-User from the verified token
+                         └── forwards to ...
+                               │
+                               ▼
+                             one shared container (Dockerfile → ytmatrix.container)
+                               └── all persistent state in an R2 bucket
 ```
+
+The split matters more than it looks. `run_worker_first` in `wrangler.jsonc` is
+an allowlist of exactly three routes; `worker/index.ts` never touches the assets
+binding and never executes for anything else. So the pages themselves are
+protected by Access alone, and the Worker's own 401 is not a second line of
+defence for them (see step 3).
 
 Three facts drive every decision below:
 
@@ -70,6 +82,9 @@ section honestly rather than skim it.
   refuse even a `--dry-run` otherwise (see below). Start Docker Desktop, or
   `open -a Docker`, before you get to step 3.
 - Node 20+ and a Cloudflare account you can log in to (`npx wrangler login`).
+- **R2 enabled on the account.** It needs a one-time opt-in with a payment
+  method — dashboard → **R2** → accept the terms. On an account that has never
+  onboarded R2, step 1's `wrangler r2 bucket create` simply fails.
 - The Python toolchain is *not* needed to deploy. It builds inside the image.
 
 ### From a fresh clone
@@ -158,8 +173,17 @@ appear in `wrangler.jsonc` and never reach the browser.
 - `YOUTUBE_API_KEY` must be a **plain API key**, not a service account —
   service accounts do not work with the YouTube Data API v3 at all (CLAUDE.md
   gotcha 1).
-- `GEMINI_API_KEY` is only needed for the **New query** button. Leave it out and
-  everything else works; New query returns 503 with a message saying so.
+- `GEMINI_API_KEY` is only needed for the **New query** button. **Set all five
+  anyway.** If you have no Gemini key, put a placeholder such as `unset` in it
+  rather than skipping the command: `worker/index.ts` hands all five to the
+  container unconditionally, and what the platform does with a secret that was
+  never set — drop it, or refuse the start config — has never been observed
+  here. A placeholder removes the question.
+
+  The cost of the placeholder is a worse error message on the one button that
+  needs it: New query fails with a 502 from Gemini instead of the clean 503
+  ("GEMINI_API_KEY is not set") you would get from a genuinely absent key.
+  Nothing else in the app touches it.
 - The three `R2_*` values are **required**. The container refuses to start
   without them, on purpose — a wall that silently persists nothing is worse
   than one that does not come up.
@@ -248,15 +272,32 @@ one.
 
 Then collect two values:
 
-- The application's **Application Audience (AUD) Tag** — on the application's
-  overview, a long hex string.
+- This application's **Application Audience (AUD) Tag** — on the application's
+  overview, a long hex string. If you end up with more than one application (see
+  below), this is the one the Worker validates against: the **yt matrix**
+  application covering the whole hostname, never any other.
 - Your **team domain**, under **Settings → Custom Pages** or the Zero Trust
   overview. It looks like `https://yourteam.cloudflareaccess.com`.
 
-Note that once the application covers the whole hostname, `/healthz` is behind
-Access too and is no longer publicly reachable. That is fine — it existed to
-check the first deploy. If you want it reachable for uptime monitoring, add a
-second Access policy with action **Bypass** for the path `/healthz`.
+### Optional: keeping `/healthz` public
+
+Once the application covers the whole hostname, `/healthz` is behind Access too
+and is no longer publicly reachable. That is fine — it existed to check the
+first deploy.
+
+If you want it reachable for uptime monitoring, note that **an Access policy has
+no path**. Policies select *who* (emails, IP ranges, everyone); the path belongs
+to the **application**. So this takes a *second* self-hosted application:
+
+- **Public hostname:** `yt.bardo.jburke.io`, **path** `healthz`
+- One policy, **Action: Bypass**, **Include → Everyone**
+
+Access resolves by longest-path match, so the more specific application wins for
+that one route and the main application still covers everything else. Leave the
+`ACCESS_POLICY_AUD` var pointing at the **main** application's AUD tag — the
+bypass application has its own, and it is not the one the Worker checks. (This
+route is unauthenticated in the Worker anyway, so no token ever reaches the
+verification path from it.)
 
 ## 5. Wire the Access values in and redeploy
 
@@ -278,9 +319,17 @@ claim. A trailing slash leaves the first working and breaks the second, so
 every request 401s while the key fetch looks perfectly healthy — a miserable
 thing to debug. Omit the scheme and both fail.
 
-Neither value is a secret — they are identifiers, not credentials, which is why
-they live in `wrangler.jsonc` as `vars` rather than going through `wrangler
-secret put`. Commit them; that is what makes the next deploy reproducible.
+Leave the other two vars alone unless you have a reason.
+`YTMATRIX_GLOBAL_DAILY_UNITS` is Google's project-wide ceiling — 10,000 units a
+day, a hundred searches — and it lives here rather than in `config.yaml`
+precisely because `config.yaml` is shared and editable by every user, so this is
+the one limit none of them can raise. `R2_BUCKET` must match the bucket you
+created in step 1.
+
+Neither Access value is a secret — they are identifiers, not credentials, which
+is why they live in `wrangler.jsonc` as `vars` rather than going through
+`wrangler secret put`. Commit them; that is what makes the next deploy
+reproducible.
 
 ```bash
 npm run deploy
@@ -322,9 +371,12 @@ for p in /api/config / ; do
 done
 ```
 
-**Pass:** both lines are a `302` whose redirect URL points at
-`https://yourteam.cloudflareaccess.com/…`. That is Access intercepting at the
-edge, before any of our code.
+**Pass:** neither line is a `200`. A `302` whose redirect URL points at
+`https://yourteam.cloudflareaccess.com/…` is the usual answer — Access
+intercepting at the edge, before any of our code — but Access does not always
+redirect a non-browser client. A `401` or `403` served with Access's own headers
+(re-run with `-D -` if you want to see them) is the same thing said differently,
+and is equally a pass. **The failure is `200`**, in either line.
 
 **Fail — `/` returns `200`:** the page is public. The Access application is not
 covering the whole hostname; check that its path field is empty. This is the
@@ -468,7 +520,8 @@ is being dropped between the Worker and the container.
 | Wall renders, never reacts to a config change | The WebSocket upgrade. Verification check 4. |
 | `/config` 404s | `html_handling` in `wrangler.jsonc`, or `dist/` was not rebuilt. `npm run build`. |
 | New query returns 503 | `GEMINI_API_KEY` is not set. |
-| Wall shows "quota spent — showing cached results" | The 10,000-unit daily allowance is gone, or `quota.daily_limit_units` in the config is lower. It resets on the Pacific date change. |
+| Wall shows "quota spent — showing cached results" | Google itself said no: a 403 `quotaExceeded` from the Data API. The project's real 10,000 units are gone, whatever this app's ledger thinks. Resets on the Pacific date change. |
+| Wall shows "daily budget spent — showing cached results" | Our own ledger stopped us first, before any call: `quota.daily_limit_units` in the config (default 5000) or `YTMATRIX_GLOBAL_DAILY_UNITS`. Raise the config value, or set it to `0` to disable that ceiling — `YTMATRIX_GLOBAL_DAILY_UNITS` still applies underneath, and is meant to. |
 | Everyone's wall is suddenly the same | Someone edited the query field on the config page. That is the one config edit that overrides each browser's own query. |
 
 ## Adding and removing users
