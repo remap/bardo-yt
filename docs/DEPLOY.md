@@ -76,6 +76,8 @@ section honestly rather than skim it.
 
 ```bash
 npm install
+npx wrangler login          # then confirm you are on the right account:
+npx wrangler whoami
 npx wrangler types          # writes worker-configuration.d.ts, which is gitignored
 npm run typecheck
 ```
@@ -196,7 +198,7 @@ routing and never forwards it, shadowing the container's identically-named
 endpoint. It proves the Worker deployed. Check 3 in the verification section is
 what proves the container is up.
 
-Everything else returns `401 Unauthorized` right now. That is correct — the
+Every API path returns `401 Unauthorized` right now. That is correct — the
 Worker is rejecting requests that carry no Access token, and Access is not
 configured yet.
 
@@ -204,6 +206,23 @@ configured yet.
 curl -s -o /dev/null -w '%{http_code}\n' https://yt.bardo.jburke.io/api/config
 # 401
 ```
+
+**The static files are a different matter, and this is the one thing in this
+runbook worth hurrying over.** `run_worker_first` in `wrangler.jsonc` lists
+`/api/*`, `/ws` and `/healthz` — only those paths invoke the Worker. Everything
+else is served straight from `dist/`, which means that between this step and the
+next, `https://yt.bardo.jburke.io/` serves the wall's HTML and JavaScript to
+anyone who asks:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://yt.bardo.jburke.io/
+# 200 -- and it will stay 200 for anyone on the internet until step 4
+```
+
+That leaks no data and no credentials — the page is inert without the API, which
+is still 401 — but it is public. Access is what protects those files, and it
+only starts protecting them once the application in step 4 exists. Do step 4
+now, not tomorrow.
 
 ## 4. Put Cloudflare Access in front
 
@@ -259,9 +278,18 @@ claim. A trailing slash leaves the first working and breaks the second, so
 every request 401s while the key fetch looks perfectly healthy — a miserable
 thing to debug. Omit the scheme and both fail.
 
+Neither value is a secret — they are identifiers, not credentials, which is why
+they live in `wrangler.jsonc` as `vars` rather than going through `wrangler
+secret put`. Commit them; that is what makes the next deploy reproducible.
+
 ```bash
 npm run deploy
 ```
+
+Every later change is the same command. `npx wrangler deployments list` shows
+the last ten, and `npx wrangler rollback [version-id]` goes back to one of them
+— useful for the Worker, though note that a rollback restores the Worker's code
+and configuration, not the R2 bucket's contents.
 
 Two more things about this file, for whoever edits it next:
 
@@ -282,18 +310,33 @@ the Access login page, then the wall.
 Then run these six checks. Each one can fail, and each failure means something
 specific. Do not skip 4 and 5 — they are what prove the design.
 
-### 1. Access is actually in front
+### 1. Access is actually in front — of both halves
+
+Check a Worker path and a static path, because they are protected by different
+things. Use a terminal with no Access session, not your signed-in browser:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://yt.bardo.jburke.io/api/config
+for p in /api/config / ; do
+  curl -s -o /dev/null -w "$p -> %{http_code} %{redirect_url}\n" \
+    "https://yt.bardo.jburke.io$p"
+done
 ```
 
-**Pass:** `302` (Access redirecting to the login page). **Fail:** `200` — the
-config of your installation is being served to anyone on the internet. Stop and
-check the application's hostname and path in Zero Trust.
+**Pass:** both lines are a `302` whose redirect URL points at
+`https://yourteam.cloudflareaccess.com/…`. That is Access intercepting at the
+edge, before any of our code.
 
-A `401` here means Access is not intercepting and the Worker is doing the
-rejecting on its own. Safe, but the application is misconfigured.
+**Fail — `/` returns `200`:** the page is public. The Access application is not
+covering the whole hostname; check that its path field is empty. This is the
+failure that matters, because `/` never reaches the Worker and has no second
+line of defence.
+
+**Fail — `/api/config` returns `200`:** stop immediately. Your configuration is
+readable by anyone.
+
+**`/api/config` returns `401` while `/` redirects:** Access is not matching the
+API path but the Worker is rejecting the request on its own. Not a leak, but the
+application is misconfigured; fix it rather than relying on the Worker.
 
 ### 2. The Worker trusts the same Access application
 
@@ -343,9 +386,14 @@ keeps the wall usable meanwhile is polling; see "Levers" below.
 ### 5. Two users: config is shared, walls are not
 
 This is the check that proves the central design decision, so do it carefully.
-You need **two browser profiles signed in as two different people** — two
-windows of the same profile share `localStorage` and will not show you
-anything.
+You need **two browser profiles** — two windows of the same profile share
+`localStorage` and will not show you anything.
+
+Two different people is the realistic test. If you are alone, two profiles
+signed in as *the same* email still tell you everything about walls and config,
+because separation is per browser profile, not per account (that is also why one
+person's laptop and TV are two separate walls). You just are not exercising
+Access with two identities.
 
 Call them A and B. Both should be showing a wall, each with its own query in
 the status line.
@@ -415,6 +463,7 @@ is being dropped between the Worker and the container.
 | `Action required — Install @types/node` from `wrangler types` | Advisory, not an error. The Worker uses no Node built-ins; `npm run typecheck` exits 0 with this printed. |
 | Authenticated, then a bare `Unauthorized` | `ACCESS_POLICY_AUD` is wrong, or `ACCESS_TEAM_DOMAIN` has a trailing slash or no scheme. |
 | Every path 401s and no login page appears | The Access application is not covering this hostname. |
+| `/` loads with no login prompt | Same cause, worse consequence: static assets never reach the Worker, so Access is the only thing protecting them. Verification check 1. |
 | `/healthz` green, `/api/*` 5xx | The container is not starting. Missing `R2_*` secret is the usual reason. `npx wrangler tail`. |
 | Wall renders, never reacts to a config change | The WebSocket upgrade. Verification check 4. |
 | `/config` 404s | `html_handling` in `wrangler.jsonc`, or `dist/` was not rebuilt. `npm run build`. |

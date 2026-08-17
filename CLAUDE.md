@@ -328,6 +328,12 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     successful deploy is easy to miss and the failure looks like a broken
     backend. (Confirmed by dry-run, not by argument.)
 
+    The list has a second consequence worth holding onto: **everything not on
+    it never reaches the Worker at all**, so `/` and `/static/*` are protected
+    by Cloudflare Access alone. The Worker's own 401 is not a backstop for
+    them. Between the first deploy and the Access application existing, the
+    bundle is public.
+
 33. **The typecheck gate is `npm run typecheck`, never a bare `npx tsc
     --noEmit`.** `tsconfig.json` references `worker-configuration.d.ts`, which
     `wrangler types` generates and `.gitignore` excludes — it mirrors
