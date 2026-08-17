@@ -2021,9 +2021,21 @@ import { needsRefetch, overridesStoredQuery } from "./grid-logic.js";
     return;
   }
   const message = await videosResponse.json();
-  // The server may have fallen back -- an unknown query is never searched.
-  // Track what it actually served so the next reload agrees with this one.
-  if (message.query !== stored) saveQuery(message.query);
+  // Store ONLY what New query hands us -- never what /api/videos served.
+  //
+  // A browser that has never pressed New query must keep sending no query at
+  // all, so the server uses the shared config query on its normal path where
+  // cache.ttl_hours still applies. Storing whatever came back would put the
+  // config query onto the client path too, which is served cache-only and
+  // never re-searches -- the wall would then never refresh on its own, and
+  // `source: "client"` in the query log would stop distinguishing anything.
+  //
+  // The one thing worth writing here is a deletion: if we sent a stored query
+  // and the server answered with a different one, our query has aged out of
+  // the shared cache and is gone. Clearing lets this browser fall back to the
+  // shared query cleanly. Storing the fallback instead would pin it as a
+  // client query forever, which is the same bug wearing a different hat.
+  if (stored && message.query !== stored) clearQuery();
   applyVideos(message);
 ```
 
@@ -2729,9 +2741,13 @@ uv run pytest tests/ -v
 node --test 'static/*.test.mjs'
 uv run pytest tests/test_player_smoke.py -m browser -v
 uv run ruff check . && uv run ruff format .
-npx tsc --noEmit
+npm run typecheck
 ```
 Expected: all pass.
+
+`npm run typecheck` rather than a bare `npx tsc --noEmit`: `tsconfig.json` references
+`worker-configuration.d.ts`, which `wrangler types` generates and `.gitignore` excludes, so the
+bare command fails with `TS2688` on any fresh clone. The script generates the file first.
 
 - [ ] **Step 4: Commit**
 
