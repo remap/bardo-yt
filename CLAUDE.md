@@ -410,3 +410,29 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     one that is a bare `except: pass`, in `querylog.py`. Deleting either
     directive as "dead" breaks `ruff check`. Each is followed by a reason; keep
     the reason with it.
+
+37. **The Dockerfile pins `--platform=linux/amd64`, and removing it produces a
+    crash that points nowhere.** Cloudflare Containers run amd64 only, so the
+    pin is not portability boilerplate — it is the target. On an ARM host
+    without it, the arm64 wheel for `google-genai` (imported by `gemini.py`)
+    dies on `from google import genai` with **SIGILL**: exit 132, no traceback,
+    no message, the process simply gone during startup. Everything else in the
+    image imports fine, so it reads as a bug in this app rather than a wheel.
+
+    BuildKit warns that a constant `--platform` hurts portability; the
+    `# check=skip=FromPlatformFlagConstDisallowed` directive on line 1 silences
+    exactly that check. It must stay the **first** line — BuildKit reads parser
+    directives only before any other content, so moving it below a comment
+    silently stops it working.
+
+    Verified on Apple Silicon: pinned build → `amd64`, Pillow's JPEG codec
+    present, `/healthz` answers `{"status":"ok"}`, and a missing R2 credential
+    still aborts startup rather than failing later.
+
+38. **Unreachable R2 is a 500, and that is deliberate.** `load_config` falls
+    back to the shipped template on a *corrupt* document (`yaml.YAMLError`,
+    `ValidationError`, `UnicodeDecodeError`) but not on a transport failure —
+    botocore raises `SSLError`/`EndpointConnectionError`, which propagate.
+    Bad R2 credentials therefore surface as a 500 naming the exact URL, which
+    is what an operator needs. Widening that catch would mask a storage outage
+    behind shipped defaults and quietly serve everyone the wrong config.

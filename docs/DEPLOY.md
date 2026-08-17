@@ -50,10 +50,23 @@ Nothing in this plan has ever executed against Cloudflare. The code typechecks,
 the Python and browser suites pass, and `wrangler` accepts the configuration —
 none of which is the same as having worked. Specifically:
 
-1. **The container image has never been built.** Docker was unavailable during
-   development. Pillow and boto3 resolving cleanly on `python:3.13-slim` is
-   inferred from `uv.lock`, not observed. If the image build fails, that is the
-   first surprise to expect.
+1. ~~**The container image has never been built.**~~ **Now built and run.** On
+   an Apple Silicon Mac: `docker build .` produces an `amd64` image, Pillow's
+   JPEG codec works inside it (so `motion.py` and `letterbox.py` will), boto3
+   resolves, a missing R2 credential still aborts startup with
+   `RuntimeError: R2_ACCOUNT_ID is not set`, and the container answers
+   `/healthz` with `{"status":"ok"}`. No `apt-get` packages were needed.
+
+   Two things that surfaced only by running it, both now fixed or documented:
+   the `FROM --platform=linux/amd64` pin (see Prerequisites — without it an ARM
+   build dies on `google-genai` with a bare SIGILL), and the fact that
+   unreachable R2 gives a clean `botocore.exceptions.SSLError` naming the exact
+   URL rather than falling back to defaults. The config fallback catches a
+   *corrupt* document, not an unreachable store — masking an outage with
+   shipped defaults would be worse than a 500.
+
+   Still unbuilt by `wrangler` itself: this was `docker build`, not
+   `wrangler deploy`, so the push to Cloudflare's registry is unexercised.
 2. **The WebSocket upgrade through the Worker has never executed.** Docker was
    down throughout, so no socket was ever opened through `worker/index.ts`.
    The code takes the plainest available shape: an upgrade is authenticated and
@@ -92,6 +105,22 @@ section honestly rather than skim it.
   method — dashboard → **R2** → accept the terms. On an account that has never
   onboarded R2, step 1's `wrangler r2 bucket create` simply fails.
 - The Python toolchain is *not* needed to deploy. It builds inside the image.
+
+### The image is amd64, whatever machine you build on
+
+Cloudflare Containers run `linux/amd64` only, so the `Dockerfile` pins
+`FROM --platform=linux/amd64` rather than inheriting the build host's
+architecture. Nothing to do — a plain `docker build .` produces the right image
+on an Apple Silicon Mac — but do not remove the pin.
+
+Without it, a build on an ARM machine fails in a way that points nowhere near
+the cause: the arm64 wheel for `google-genai` (pulled in by `ytmatrix/gemini.py`)
+dies on import with **SIGILL**, so the container exits 132 with no traceback and
+no message. The process just vanishes during startup. Everything else in the
+image imports cleanly, which makes it look like a problem with this app.
+
+Verified on an Apple Silicon Mac: the pinned build produces `amd64`, starts, and
+answers `/healthz` with `{"status":"ok"}`.
 
 ### From a fresh clone
 
