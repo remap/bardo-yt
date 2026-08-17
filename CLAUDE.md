@@ -308,6 +308,28 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     a config edit must beat the browser's own query — someone typing in the
     config page's query field.
 
+    Two consequences of moving that decision to the client, both live:
+
+    **Every open wall refetches at once, and `resolve_videos`'s single-flight
+    is the only thing keeping that at one search.** `needsRefetch` is true for
+    any change under `search.*`, not just the query. Ten walls each miss the
+    same new cache key in the same instant, and each miss is 100 units — 1000
+    from one toggle of `search.order` without the guard. The guard is an
+    in-process dict of locks scoped to `create_app`, which works *because there
+    is one shared container*; waiters re-read the cache instead of searching.
+    Per-user containers would silently void it (gotcha 30).
+
+    **Any search-affecting edit also erases everyone's personal query and
+    unifies the walls** — not just an edit to the query field. A stored query
+    is honoured only when the shared cache holds it *under the current search
+    params* (gotcha 28), so changing `search.order` makes every stored query
+    unservable; each browser gets the config query back, and
+    `if (stored && message.query !== stored) clearQuery()` in `player.js`
+    drops it. That is correct — their query genuinely cannot be served without
+    spending 100 units per wall — but it is much broader than
+    `overridesStoredQuery()`, which covers only the query field, and it
+    surprises people.
+
 30. **The container is shared and `getByName("wall")` is why.** It can be
     shared because there is no per-user server state, and that is what keeps
     ten walls costing about what one does. Passing the email there instead
@@ -349,15 +371,23 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     the Worker ships pointing at a stale image. A real `wrangler deploy`
     requires Docker running, full stop.
 
-35. **The WebSocket upgrade through the Worker has never executed.** Docker was
-    down for the whole of this work, so nothing ever opened a socket through
-    `worker/index.ts`. The forward is `new Request(request, { headers })` —
-    inbound headers are immutable in Workers, so that is the only way to inject
-    the verified identity onto an upgrade — and the stub's response is returned
-    **unwrapped**, because `new Response(res.body, res)` silently drops the
-    `webSocket` a 101 carries. Both lines are reasoned, neither is observed. If
-    a deployed wall renders but never reacts to a config change, start here
-    (`docs/DEPLOY.md`, verification check 4).
+35. **An upgrade is forwarded unmodified; only HTTP gets the identity header.**
+    `worker/index.ts` branches on `upgrade: websocket` *after* verifying the
+    JWT and *before* rebuilding the headers, and hands the original Request
+    straight to the stub. The socket has no use for identity —
+    `websocket_endpoint` never reads `X-Wall-User`, and the only consumer of
+    that header is the query log, written on HTTP requests — so the one path
+    whose request reconstruction nothing has ever executed is also the one path
+    with nothing to gain from it. Do not "unify" the two branches.
+
+    On both branches the stub's response is returned **unwrapped**, because
+    `new Response(res.body, res)` silently drops the `webSocket` a 101 carries.
+    The HTTP branch still needs `new Request(request, { headers })`: inbound
+    headers are immutable in Workers.
+
+    Docker was down for the whole of this work, so no socket has ever gone
+    through the Worker at all. If a deployed wall renders but never reacts to a
+    config change, start here (`docs/DEPLOY.md`, verification check 4).
 
 36. **The `# noqa: BLE001` / `# noqa: S110` directives are load-bearing.** This
     project runs ruff 0.16.2, whose default rule set is far wider than older

@@ -95,6 +95,22 @@ export default {
       return new Response("Unauthorized", { status: 401 });
     }
 
+    // An upgrade is forwarded exactly as it arrived -- no reconstruction, no
+    // injected identity. The socket is a server->client broadcast channel and
+    // carries no identity at all: `websocket_endpoint` never reads
+    // `X-Wall-User`, and the only place the container uses the header is the
+    // query log, which is written on HTTP requests. So the one path whose
+    // request reconstruction nothing has ever executed is also the one path
+    // that has no use for it. Handing the stub the original Request is what
+    // every Cloudflare WebSocket example does, and it is the shape
+    // `@cloudflare/containers` expects: its `containerFetch` checks
+    // `res.webSocket`, builds a WebSocketPair and pumps both directions.
+    //
+    // Authentication still happens first, above -- an upgrade is not exempt.
+    if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      return env.WALL.getByName("wall").fetch(request);
+    }
+
     // Overwrite rather than merge. The container writes this straight into the
     // query log, so it must come from the verified token on this line and
     // never from anything the client sent.
@@ -104,15 +120,13 @@ export default {
 
     // A constant name, so every user lands on the same instance.
     //
-    // /ws rides this same call: the Container class is expected to carry the
-    // upgrade through to the container's port with no special handling. That
-    // is the one line here nothing has executed -- Docker was down, so no
-    // local run ever opened a socket through it. If the wall loads but never
-    // populates, suspect this before anything else.
+    // Rebuilt rather than mutated: inbound headers are immutable in Workers,
+    // so `new Request(request, { headers })` is the only way to add one to a
+    // forwarded request. /ws never reaches this line (see the branch above).
     //
-    // The stub's Response is returned UNWRAPPED, and must stay that way: a
-    // 101 carries its half of the socket on `response.webSocket`, which
-    // `new Response(res.body, res)` silently drops.
+    // Either way the stub's Response is returned UNWRAPPED, and must stay
+    // that way: a 101 carries its half of the socket on `response.webSocket`,
+    // which `new Response(res.body, res)` silently drops.
     return env.WALL.getByName("wall").fetch(new Request(request, { headers }));
   },
 } satisfies ExportedHandler<Env>;

@@ -11,11 +11,20 @@ somewhere the container does not own.
 whole test suite run with no Cloudflare account. `R2Store` is production.
 
 The interface is deliberately tiny: bytes in, bytes out, a prefix listing, and
-one compare-and-swap. Only the budget ledger needs the CAS -- it is the single
-piece of state with more than one writer, because every user's container
-spends from the same 10,000-unit daily allowance. Everything else is either
-immutable (content-addressed cache entries) or single-writer (a user's own
-config and wall state, written only by that user's own container).
+one compare-and-swap. Only the budget ledger uses the CAS, and the reason is
+consequence rather than structure: a lost update there silently un-spends 100
+units of a 10,000-unit day, and the ledger is written on every search by every
+user of the one shared container.
+
+Nothing else here is single-writer -- config is one shared key that every user
+can save, and the cache entries are content-addressed, which makes a collision
+a rewrite of identical bytes rather than a race. `server.put_config` is an
+unguarded read-merge-write spanning several awaits on a key anyone can write,
+so two saves landing together lose one of them. That is an **accepted risk**,
+not an impossibility: at 5-10 users who edit rarely the window is milliseconds
+wide, and the loser is not left guessing -- the winner's broadcast repaints
+their form, so the lost edit is visible and saving again fixes it. If the
+installation ever outgrows that, `put_config` is what needs `put_if_version`.
 """
 
 from __future__ import annotations
@@ -141,10 +150,6 @@ class R2Store:
     are network round trips, and blocking the event loop on them would stall
     every other player waiting on the same container.
     """
-
-    #: A failed conditional write means someone else won the race; re-read and
-    #: try again. Ten is far more than 5-10 users can realistically contend for.
-    CAS_ATTEMPTS = 10
 
     def __init__(self, client: Any, bucket: str) -> None:
         self._client = client

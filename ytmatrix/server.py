@@ -46,14 +46,69 @@ async def resolve_videos(
     query: str | None = None,
     *,
     global_limit_units: int = budget.DAILY_QUOTA_UNITS,
+    inflight: dict[str, asyncio.Lock] | None = None,
 ) -> dict:
-    """Return the video list for this config, spending quota only when required."""
+    """Return the video list for this config, spending quota only when required.
+
+    `inflight` is the single-flight guard, one lock per cache key, owned by
+    `create_app`. Saving a search-affecting config change tells every connected
+    browser to resync at once, and they all miss the same new cache key in the
+    same instant -- without this, ten open walls turn one toggle of
+    `search.order` into ten searches, 1000 of the day's 10,000 units. Waiters
+    do not search: they take the lock, re-read the cache, and find what the
+    winner wrote.
+
+    An in-process lock is enough *because there is exactly one container for
+    the whole installation* (CLAUDE.md gotcha 30). The corollary is the thing
+    worth writing down: move to per-user containers and this guard silently
+    stops covering anything, because each instance would have its own dict. A
+    shared guard would then have to be a claim written to R2.
+
+    Omitting `inflight` skips the guard entirely, which is what a lone caller
+    -- a test, or a script -- wants.
+    """
     params = search_params_for(config, query)
 
     items = await cache.read(store, params, config.cache.ttl_hours)
     if items is not None:
         return {"items": items, "from_cache": True, "note": None}
 
+    if inflight is None:
+        return await _search_and_cache(config, store, api_key, params, global_limit_units)
+
+    key = cache.cache_key(params)
+    # No await between the read and the insert, so this cannot race.
+    lock = inflight.get(key)
+    if lock is None:
+        lock = inflight[key] = asyncio.Lock()
+    try:
+        async with lock:
+            # The winner wrote the cache before releasing, so this is a hit for
+            # everyone who queued behind it. A miss here means the winner
+            # failed or was refused, and searching again is then correct.
+            items = await cache.read(store, params, config.cache.ttl_hours)
+            if items is not None:
+                return {"items": items, "from_cache": True, "note": None}
+            return await _search_and_cache(config, store, api_key, params, global_limit_units)
+    finally:
+        # Dropped as soon as nobody holds it, so the dict does not accumulate a
+        # lock per query the process ever missed. A waiter that has been woken
+        # but has not yet resumed makes `locked()` briefly false and can lose
+        # its entry to this line -- harmless: it still holds its own reference
+        # to the lock, and anyone arriving after the write hits the cache
+        # before reaching this code at all.
+        if not lock.locked() and inflight.get(key) is lock:
+            del inflight[key]
+
+
+async def _search_and_cache(
+    config: Config,
+    store: Store,
+    api_key: str,
+    params: dict[str, str],
+    global_limit_units: int,
+) -> dict:
+    """The spending half of `resolve_videos`, past the cache miss."""
     # Checked before the call, not after: the point is to not spend the unit.
     # Two ceilings: the shared config's, which any user can lower, and the
     # project-wide one, which none of them can raise.
@@ -246,6 +301,11 @@ def create_app(
     app = FastAPI(title="yt matrix")
     manager = ConnectionManager()
 
+    # One lock per cache key currently being searched for, shared by every
+    # request this process serves -- see `resolve_videos`. It lives here rather
+    # than at module scope so two apps in one test session cannot collide.
+    inflight: dict[str, asyncio.Lock] = {}
+
     def user_of(request: Request) -> str:
         """Who is asking, for the query log and nothing else.
 
@@ -318,6 +378,7 @@ def create_app(
                     settings.youtube_api_key,
                     query,
                     global_limit_units=settings.global_daily_units,
+                    inflight=inflight,
                 )
             except BudgetExceededError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc

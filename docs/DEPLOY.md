@@ -54,18 +54,24 @@ none of which is the same as having worked. Specifically:
    development. Pillow and boto3 resolving cleanly on `python:3.13-slim` is
    inferred from `uv.lock`, not observed. If the image build fails, that is the
    first surprise to expect.
-2. **The WebSocket upgrade through the Worker is the highest-risk path in the
-   whole deployment.** `worker/index.ts` forwards with
-   `new Request(request, { headers })` to inject the verified identity, and
-   returns the container's response unwrapped so a 101's `response.webSocket`
-   survives. Inbound headers are immutable in Workers, so this is the only way
-   to add one to a forwarded upgrade — the reasoning is sound and the code
-   carries a comment saying so, but **it has never executed**. If the wall
-   renders but never reacts to a config change, suspect this before anything
-   else. Verification check 4 below is what catches it.
+2. **The WebSocket upgrade through the Worker has never executed.** Docker was
+   down throughout, so no socket was ever opened through `worker/index.ts`.
+   The code takes the plainest available shape: an upgrade is authenticated and
+   then forwarded **unmodified** to the container stub, and the response is
+   returned **unwrapped** so a 101's `response.webSocket` survives. The socket
+   carries no identity, so it needs none of the header rebuilding the HTTP
+   paths do. That is the pattern Cloudflare's own examples use and the one
+   `@cloudflare/containers` handles explicitly — but it is still unobserved.
+   If the wall renders but never reacts to a config change, suspect this
+   before anything else. Verification check 4 below is what catches it.
 3. **JWT verification has never met a live Access application.** The algorithm,
    issuer and audience checks are all pinned, but no real token has been through
    them.
+4. **The optional `/healthz` bypass application has never been built.** The
+   claim in step 4 that Access resolves by longest-path match, so a
+   path-scoped application wins over the hostname-wide one, comes from
+   Cloudflare's documentation and nothing here has tested it. It affects only
+   that optional extra, never the main path.
 
 None of this is a reason not to deploy. It is a reason to run the verification
 section honestly rather than skim it.
@@ -292,8 +298,12 @@ to the **application**. So this takes a *second* self-hosted application:
 - **Public hostname:** `yt.bardo.jburke.io`, **path** `healthz`
 - One policy, **Action: Bypass**, **Include → Everyone**
 
-Access resolves by longest-path match, so the more specific application wins for
-that one route and the main application still covers everything else. Leave the
+Access is documented to resolve by longest-path match, so the more specific
+application should win for that one route while the main application still
+covers everything else. That is read from Cloudflare's documentation and has
+never been built here — if `/healthz` still prompts for a login after you add
+the bypass application, the ordering is not doing what this paragraph says and
+the answer is Cloudflare's, not this repository's. Leave the
 `ACCESS_POLICY_AUD` var pointing at the **main** application's AUD tag — the
 bypass application has its own, and it is not the one the Worker checks. (This
 route is unauthenticated in the Worker anyway, so no token ever reaches the
@@ -430,10 +440,13 @@ Worker's forward. Confirm it in devtools: Network → WS filter → `/ws` should
 show status **101 Switching Protocols** and a live message list. A 200, a 426,
 or a connection that closes and retries forever is the failure.
 
-If it fails, the suspect is the single `return env.WALL.getByName("wall").fetch(
-new Request(request, { headers }))` line in `worker/index.ts` — specifically
-whether `new Request(request, …)` preserves the upgrade. The fallback that
-keeps the wall usable meanwhile is polling; see "Levers" below.
+If it fails, the suspect is the upgrade branch in `worker/index.ts` — the
+`return env.WALL.getByName("wall").fetch(request)` that runs before the header
+rebuild. The request goes to the stub exactly as it arrived and its response
+comes back unwrapped, which is the shape every Cloudflare WebSocket example
+uses, so a failure here is about the Worker→container hop itself rather than
+about anything this code does to the request. The fallback that keeps the wall
+usable meanwhile is polling; see "Levers" below.
 
 ### 5. Two users: config is shared, walls are not
 
@@ -466,9 +479,21 @@ the status line.
    carrying a video set with it. Also a real defect; the server does not know
    what query any browser is watching and must not pretend to.
 
-   One deliberate exception: editing the **query field itself** on the config
-   page *does* move everyone's wall. That is a config change to the shared
-   query, and it is meant to beat each browser's stored one.
+   `grid.cols` is the right field to test with, because it is one of the
+   changes that does *not* touch the search.
+
+   **Any edit that changes the search unifies the walls, and that is expected.**
+   Not only the query field: `order`, `video_duration`, `safe_search` and
+   `relevance_language` do it too. A browser's stored query is served only from
+   the shared cache *under the current search parameters*, so once those
+   change, nobody's stored query can be served without spending 100 units per
+   wall — every wall falls back to the shared config query and forgets its own.
+   Pressing **New query** afterwards gives each browser its own wall back.
+
+   The cost of that is one search for the installation, not one per wall: the
+   server collapses concurrent identical resolutions into a single call. Check
+   it if you like — the `… units today` figure should climb by 100 once,
+   however many walls are open.
 
 3. **A reload is free.** Note the `… units today` figure in each wall's status
    line, then reload both.
@@ -522,7 +547,7 @@ is being dropped between the Worker and the container.
 | New query returns 503 | `GEMINI_API_KEY` is not set. |
 | Wall shows "quota spent — showing cached results" | Google itself said no: a 403 `quotaExceeded` from the Data API. The project's real 10,000 units are gone, whatever this app's ledger thinks. Resets on the Pacific date change. |
 | Wall shows "daily budget spent — showing cached results" | Our own ledger stopped us first, before any call: `quota.daily_limit_units` in the config (default 5000) or `YTMATRIX_GLOBAL_DAILY_UNITS`. Raise the config value, or set it to `0` to disable that ceiling — `YTMATRIX_GLOBAL_DAILY_UNITS` still applies underneath, and is meant to. |
-| Everyone's wall is suddenly the same | Someone edited the query field on the config page. That is the one config edit that overrides each browser's own query. |
+| Everyone's wall is suddenly the same | Someone saved a config change that affects the search — the query field, or any of `order`, `video_duration`, `safe_search`, `relevance_language`. No stored query is servable under the new parameters, so every wall falls back to the shared query. Press **New query** to get a personal wall back. |
 
 ## Adding and removing users
 

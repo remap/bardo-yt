@@ -255,6 +255,77 @@ def test_a_successful_search_is_written_to_cache(app_env, monkeypatch):
     assert len(calls) == 1  # the second request must not spend quota
 
 
+def counting_search(calls, delay: float = 0.05):
+    """A stubbed search that records its calls and takes long enough to overlap.
+
+    The `sleep` is the whole point: a coroutine that never really awaits runs
+    to completion before anything else is scheduled, so without it the second
+    caller could not arrive mid-search and there would be no race to guard
+    against.
+    """
+
+    async def fake_search(params, api_key, *, client=None):
+        calls.append(params)
+        await asyncio.sleep(delay)
+        return [{"video_id": f"c{i}", "title": "T", "channel": "C"} for i in range(50)]
+
+    return fake_search
+
+
+async def test_concurrent_resolutions_of_one_query_run_a_single_search(app_env, monkeypatch):
+    """Ten open walls must not turn one config save into ten searches.
+
+    A search-affecting config change makes every connected browser resync at
+    once (`needsRefetch` in grid-logic.js), and they all miss the same
+    brand-new cache key in the same instant. The single-flight is what keeps
+    that at 100 units instead of 100 per wall.
+
+    The second half is the evidence that the guard is doing the work: the
+    identical scenario without the `inflight` dict searches once per caller.
+    """
+    _, default_path, store = app_env
+    config = await load_config(store, default_path=default_path)
+
+    guarded = []
+    monkeypatch.setattr(youtube, "search", counting_search(guarded))
+    inflight = {}
+    results = await asyncio.gather(
+        *(
+            server.resolve_videos(config, store, "TEST_KEY", "one query", inflight=inflight)
+            for _ in range(2)
+        )
+    )
+
+    assert len(guarded) == 1, "each concurrent caller ran its own 100-unit search"
+    assert await budget.spent(store) == 100
+    assert results[0]["items"] == results[1]["items"], "the waiter got the winner's results"
+    assert results[1]["from_cache"] is True, "the waiter was served from the cache, not the wire"
+    assert inflight == {}, "the lock outlived the search it was guarding"
+
+    unguarded = []
+    monkeypatch.setattr(youtube, "search", counting_search(unguarded))
+    await asyncio.gather(
+        *(server.resolve_videos(config, store, "TEST_KEY", "another query") for _ in range(2))
+    )
+    assert len(unguarded) == 2, "without the guard this test could not fail"
+
+
+async def test_two_browsers_resyncing_at_once_share_one_search(app_env, monkeypatch):
+    """The same guard, reached through the route -- create_app must wire it."""
+    app, _, store = app_env
+    calls = []
+    monkeypatch.setattr(youtube, "search", counting_search(calls))
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        first, second = await asyncio.gather(client.get("/api/videos"), client.get("/api/videos"))
+
+    assert len(calls) == 1
+    assert await budget.spent(store) == 100
+    assert first.json()["video_ids"] == second.json()["video_ids"]
+
+
 def test_zero_results_is_not_an_error(app_env, monkeypatch):
     app, _, _ = app_env
 
