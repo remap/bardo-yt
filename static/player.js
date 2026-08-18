@@ -21,6 +21,37 @@ import {
   overridesStoredQuery,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
+
+// --- diagnostics -----------------------------------------------------------
+//
+// Deliberately verbose and deliberately always on. The wall is slow in ways
+// that only show up on the deployment -- a container waking from sleep, a
+// Gemini call that takes fifteen seconds, a resync racing a generation -- and
+// none of that is visible from a laptop. Timestamps are relative to page load,
+// so a log can be read as a timeline rather than a pile of events.
+const T0 = performance.now();
+const since = () => ((performance.now() - T0) / 1000).toFixed(2).padStart(6);
+function wlog(...args) {
+  console.log(`[wall ${since()}s]`, ...args);
+}
+
+/** fetch, with the round trip timed and both ends logged. */
+async function tfetch(label, url, init) {
+  const started = performance.now();
+  wlog(`-> ${label}`, url);
+  try {
+    const response = await fetch(url, init);
+    const ms = Math.round(performance.now() - started);
+    wlog(`<- ${label} ${response.status} in ${ms}ms`);
+    return response;
+  } catch (error) {
+    const ms = Math.round(performance.now() - started);
+    wlog(`<- ${label} FAILED after ${ms}ms`, error);
+    throw error;
+  }
+}
+
+wlog("player.js loaded");
 import { clearQuery, loadHistory, loadQuery, pushHistory, saveQuery } from "./wallstate.js";
 
 const gridEl = document.getElementById("grid");
@@ -72,6 +103,16 @@ let generation = 0;
 // at all. Same idea, different lifetimes -- a single counter would make a
 // preroll cancel a legitimate resync.
 let applySeq = 0;
+
+// True while a New query is waiting on Gemini. An automatic resync -- a
+// WebSocket reconnect, a config push -- must not supersede an explicit act the
+// operator paid 100 units for. Without this, a generation that took longer than
+// the reconnect it raced was discarded silently: the units were spent, the query
+// went into the avoid-list, and the wall never changed. That is the "having it
+// outstanding confuses things" case, and the fix is precedence rather than
+// ordering: whoever asked LAST wins among equals, but a deliberate request
+// outranks a housekeeping one.
+let generating = false;
 
 const PREROLL_TIMEOUT_MS = 25000;
 const PREROLL_POLL_MS = 250;
@@ -492,8 +533,15 @@ async function prerollCurrentSet(token) {
       player ? prerollOne(player, index, token, deadline) : null,
     ),
   );
-  if (generation !== token) return;
+  if (generation !== token) {
+    wlog(`preroll ${token} abandoned -- generation is now ${generation}`);
+    return;
+  }
 
+  wlog(
+    `preroll complete in ${Math.round(performance.now() - prerollStarted)}ms ` +
+      `(${set.length} cells) -- the wall becomes visible now`,
+  );
   finishPreroll(token);
 }
 
@@ -613,16 +661,22 @@ let seededFollowFromConfig = false;
 
 async function requestNewQuery(prompt = null) {
   const seq = ++applySeq;
+  generating = true;
+  const history = loadHistory();
+  wlog(
+    `NEW QUERY start (seq ${seq}) steer=${JSON.stringify(prompt)} ` +
+      `history=${history.length} entries -- this is the only thing that spends 100 units`,
+  );
   newQueryButton.disabled = true;
   setStatus(prompt ? `inventing a query from “${prompt}”…` : "inventing a query…", "busy");
   try {
-    const response = await fetch("/api/new-query", {
+    const response = await tfetch("POST /api/new-query", "/api/new-query", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         ...(prompt ? { prompt } : {}),
         // The avoid-list lives here now, so it has to travel with the request.
-        history: loadHistory(),
+        history,
       }),
     });
     if (response.ok) {
@@ -631,7 +685,13 @@ async function requestNewQuery(prompt = null) {
       // Gemini said this, so the avoid-list should know even if the result is
       // no longer wanted on screen.
       pushHistory(message.query);
-      if (seq !== applySeq) return true;
+      if (seq !== applySeq) {
+        wlog(
+          `NEW QUERY DISCARDED (seq ${seq}, now ${applySeq}) -- ${JSON.stringify(message.query)} ` +
+            `was generated and PAID FOR, but something newer superseded it before it landed`,
+        );
+        return true;
+      }
       // Remember it before applying: a reload must land on the same wall, and
       // replaying a stored query costs nothing (the server serves it from
       // cache or falls back -- it never re-searches).
@@ -641,15 +701,19 @@ async function requestNewQuery(prompt = null) {
     }
     // A failed generation must leave the wall working, not blank.
     const body = await response.json().catch(() => ({}));
+    wlog(`NEW QUERY FAILED ${response.status}`, body);
     setStatus(`query generation failed: ${body.detail ?? response.status}`, "error");
     return false;
   } finally {
+    generating = false;
     newQueryButton.disabled = false;
   }
 }
 
 async function resync() {
-  config = await (await fetch("/api/config")).json();
+  const seqAtEntry = applySeq + 1;
+  wlog(`resync start (seq ${seqAtEntry})`);
+  config = await (await tfetch("GET /api/config", "/api/config")).json();
 
   // Seed once. On a later reconnect the button, not the file, is the truth.
   if (!seededMuteFromConfig) {
@@ -676,13 +740,29 @@ async function resync() {
     if (await requestNewQuery()) return;
   }
 
+  // A generation is waiting on Gemini, and it outranks this. Claiming a
+  // sequence here would supersede it, throwing away a result the operator asked
+  // for and paid for; refetching the videos it is about to replace is pointless
+  // besides. The config above has already been refreshed, which is the half of
+  // a resync that is still worth doing.
+  if (generating) {
+    wlog("resync: a New query is in flight and outranks this -- leaving the videos to it");
+    return;
+  }
+
   // Taken here, not at the top of resync: the ?new=true branch above may have
   // run requestNewQuery, which takes a sequence of its own. Claiming ours after
   // that keeps a failed generation from leaving this resync permanently stale
   // and the wall unrendered.
   const seq = ++applySeq;
   const stored = loadQuery();
-  const videosResponse = await fetch(
+  wlog(
+    stored
+      ? `resync: replaying stored query ${JSON.stringify(stored)}`
+      : "resync: no stored query, asking for the shared config query",
+  );
+  const videosResponse = await tfetch(
+    "GET /api/videos",
     stored ? `/api/videos?query=${encodeURIComponent(stored)}` : "/api/videos",
   );
   if (!videosResponse.ok) {
@@ -708,8 +788,14 @@ async function resync() {
   // Superseded while we were waiting -- a New query started after this resync
   // did. Returning here is what stops the clearQuery() below from erasing the
   // query that generation just saved.
-  if (seq !== applySeq) return;
-  if (stored && message.query !== stored) clearQuery();
+  if (seq !== applySeq) {
+    wlog(`resync DISCARDED (seq ${seq}, now ${applySeq}) -- something newer was asked for`);
+    return;
+  }
+  if (stored && message.query !== stored) {
+    wlog(`resync: stored query is gone from the cache, clearing it (server served ${JSON.stringify(message.query)})`);
+    clearQuery();
+  }
   applyVideos(message);
 }
 
@@ -1068,15 +1154,23 @@ connectSocket({
   // New query. Deciding whether a config change means this browser has to
   // refetch is therefore the client's job, done right here.
   onMessage: (message) => {
+    wlog(`socket message type=${message.type}`);
     if (message.type !== "config") return;
     const previous = config;
     const change = classifyConfigChange(previous, message.config);
     config = message.config;
+    wlog(`config pushed: change=${change}`);
     if (change === "rebuild") rebuild();
     else if (change === "in-place") applyInPlace();
     // Someone typed a query on the config page: that is an explicit
     // override and it beats whatever this browser had stored.
-    if (overridesStoredQuery(previous, message.config)) clearQuery();
-    if (needsRefetch(previous, message.config)) resync();
+    if (overridesStoredQuery(previous, message.config)) {
+      wlog("config's query field was edited -- that overrides this browser's stored query");
+      clearQuery();
+    }
+    if (needsRefetch(previous, message.config)) {
+      wlog("config change affects the search -- refetching");
+      resync();
+    }
   },
 });

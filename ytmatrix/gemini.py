@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any
 
 from google import genai
 from google.genai import types
@@ -106,6 +107,20 @@ def build_prompt(theme: str, avoid: list[str], instruction: str | None = None) -
     return "\n\n".join(parts)
 
 
+#: One client per key, reused for the life of the process. It was constructed
+#: per call, so every generation paid a fresh TLS handshake and connection pool
+#: to generativelanguage.googleapis.com -- and the first also paid DNS. Cheap on
+#: a laptop with a warm resolver, not cheap from a container that just woke up.
+_CLIENTS: dict[str | None, Any] = {}
+
+
+def _shared_client(api_key: str | None) -> Any:
+    client = _CLIENTS.get(api_key)
+    if client is None:
+        client = _CLIENTS[api_key] = genai.Client(api_key=api_key)
+    return client
+
+
 async def generate_query(
     theme: str,
     avoid: list[str],
@@ -115,7 +130,7 @@ async def generate_query(
     instruction: str | None = None,
     client=None,
 ) -> str:
-    client = client or genai.Client(api_key=api_key)
+    client = client or _shared_client(api_key)
     prompt = build_prompt(theme, avoid, instruction)
     started = time.monotonic()
     try:

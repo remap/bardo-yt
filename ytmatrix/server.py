@@ -134,6 +134,7 @@ async def _search_and_cache(
             f"({await budget.spent(store)} used). Raise quota.daily_limit_units to continue."
         )
 
+    search_started = time.monotonic()
     try:
         items = await youtube.search(params, api_key)
     except youtube.QuotaExceededError:
@@ -143,9 +144,16 @@ async def _search_and_cache(
             raise
         return {"items": stale, "from_cache": True, "note": "quota_exceeded_stale"}
 
+    search_secs = time.monotonic() - search_started
+    logger.info("search %.2fs -> %d items", search_secs, len(items))
     await budget.record_search(store)
     await cache.write(store, params, items)
-    return {"items": items, "from_cache": False, "note": None}
+    return {
+        "items": items,
+        "from_cache": False,
+        "note": None,
+        "search_secs": round(search_secs, 2),
+    }
 
 
 async def motion_score(video_id: str, index: DerivedIndex, client: httpx.AsyncClient) -> float:
@@ -562,6 +570,9 @@ def create_app(
         selection["timings"] = {
             **(selection.get("timings") or {}),
             **(extra_timings or {}),
+            # Only present on a real search, so its absence says "cache hit"
+            # rather than "instant".
+            **({"search": resolved["search_secs"]} if "search_secs" in resolved else {}),
             "total": round(time.monotonic() - started, 2),
         }
         message = videos_message(config, resolved, query, selection, await budget.spent(store))
