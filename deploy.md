@@ -7,6 +7,26 @@ the troubleshooting table are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ---
 
+> ## ⚠️ Run everything from the worktree
+>
+> ```bash
+> cd /Users/jburke/Dropbox/eutamias-dev/bardo/yt/.claude/worktrees/feat-cloudflare-deploy
+> ```
+>
+> `Dockerfile`, `wrangler.jsonc` and `package.json` live on the branch, not on
+> `main`. From the main checkout every command below fails in a way that reads
+> like a broken setup rather than a wrong directory:
+>
+> | Command | What you get from the wrong directory |
+> |---|---|
+> | `docker build .` | `failed to read dockerfile: no such file or directory` |
+> | `npx wrangler types` | `No config file detected` |
+> | `npm run deploy` | `Could not read package.json` |
+>
+> Merging the PR removes this footgun entirely.
+
+---
+
 ## 0. Before you start
 
 - Docker Desktop **running** (`wrangler deploy` builds the image).
