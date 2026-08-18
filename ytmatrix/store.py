@@ -108,7 +108,12 @@ class FileStore:
         return sorted(key for key in keys if key.startswith(prefix))
 
 
-def r2_client(account_id: str, access_key_id: str, secret_access_key: str) -> Any:
+def r2_client(
+    account_id: str,
+    access_key_id: str,
+    secret_access_key: str,
+    endpoint_url: str | None = None,
+) -> Any:
     """A boto3 S3 client pointed at R2, taught to send conditional headers.
 
     boto3 has no first-class parameter for the If-Match/If-None-Match headers
@@ -116,13 +121,19 @@ def r2_client(account_id: str, access_key_id: str, secret_access_key: str) -> An
     them through: the first lifts our `custom_headers` kwarg out before
     botocore's parameter validation rejects it, the second puts it on the wire.
     This is the pattern Cloudflare documents for R2 conditional writes.
+
+    `endpoint_url` overrides the R2 endpoint, and exists so the production
+    container can be run against a local S3-compatible store (MinIO) without
+    a Cloudflare account. Unset means real R2, so production is unaffected.
+    Nothing shipped this way until the image was first built by hand and found
+    to be untestable without it.
     """
     import boto3
     from botocore.config import Config as BotoConfig
 
     client = boto3.client(
         "s3",
-        endpoint_url=f"https://{account_id}.r2.cloudflarestorage.com",
+        endpoint_url=endpoint_url or f"https://{account_id}.r2.cloudflarestorage.com",
         aws_access_key_id=access_key_id,
         aws_secret_access_key=secret_access_key,
         region_name="auto",

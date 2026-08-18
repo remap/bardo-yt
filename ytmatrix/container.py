@@ -37,6 +37,10 @@ def main() -> None:
             account_id=_required("R2_ACCOUNT_ID"),
             access_key_id=_required("R2_ACCESS_KEY_ID"),
             secret_access_key=_required("R2_SECRET_ACCESS_KEY"),
+            # Optional, and only ever set when pointing this image at a local
+            # S3-compatible store to exercise it without a Cloudflare account.
+            # Unset -- the production case -- means real R2.
+            endpoint_url=os.environ.get("R2_ENDPOINT_URL") or None,
         ),
         bucket=_required("R2_BUCKET"),
     )

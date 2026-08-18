@@ -20,6 +20,8 @@ declare global {
       R2_ACCOUNT_ID: string;
       R2_ACCESS_KEY_ID: string;
       R2_SECRET_ACCESS_KEY: string;
+      /** Optional; empty means real R2. See the Wall class in index.ts. */
+      R2_ENDPOINT_URL?: string;
     }
   }
 }

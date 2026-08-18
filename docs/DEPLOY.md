@@ -44,50 +44,80 @@ Three facts drive every decision below:
   image, so the cache, the query log, the quota ledger and `config.yaml` all
   live in R2.
 
-## Read this before you start: what has never been run
+## Read this before you start: what has and has not been run
 
-Nothing in this plan has ever executed against Cloudflare. The code typechecks,
-the Python and browser suites pass, and `wrangler` accepts the configuration —
-none of which is the same as having worked. Specifically:
+The whole stack has now been exercised locally, end to end, under `wrangler
+dev` against a real container and an S3-compatible store. "Run locally" is
+still not "run on Cloudflare", so this section says which is which.
 
-1. ~~**The container image has never been built.**~~ **Now built and run.** On
-   an Apple Silicon Mac: `docker build .` produces an `amd64` image, Pillow's
-   JPEG codec works inside it (so `motion.py` and `letterbox.py` will), boto3
-   resolves, a missing R2 credential still aborts startup with
-   `RuntimeError: R2_ACCOUNT_ID is not set`, and the container answers
-   `/healthz` with `{"status":"ok"}`. No `apt-get` packages were needed.
+### Verified by running it
 
-   Two things that surfaced only by running it, both now fixed or documented:
-   the `FROM --platform=linux/amd64` pin (see Prerequisites — without it an ARM
-   build dies on `google-genai` with a bare SIGILL), and the fact that
-   unreachable R2 gives a clean `botocore.exceptions.SSLError` naming the exact
-   URL rather than falling back to defaults. The config fallback catches a
-   *corrupt* document, not an unreachable store — masking an outage with
-   shipped defaults would be worse than a 500.
+- **The container image builds and serves.** `amd64`, Pillow's JPEG codec
+  present (so `motion.py` and `letterbox.py` work), boto3 resolving, no
+  `apt-get` packages needed. A missing R2 credential aborts startup with
+  `RuntimeError: R2_ACCOUNT_ID is not set`.
+- **A real YouTube search, through the container, through the store.** 100
+  units spent, 8 videos into a 4x2 grid with 42 reserves, 32 motion scores for
+  50 results (`grid + scan_depth`, per gotcha 16), 50 origin lookups, the
+  ledger written by compare-and-swap, and titles unescaped correctly. A second
+  request came back `from_cache: true` with the ledger unmoved -- the
+  never-spend guarantee, observed rather than argued.
+- **The WebSocket upgrade through the Worker.** This was the highest-risk
+  unverified path in the project. An unauthenticated upgrade is refused with
+  401; an authenticated one reaches the container; a config save broadcasts
+  `{"type": "config"}` and **no** videos frame follows.
+- **JWT verification, with a real RS256 token.** Issuer, audience, algorithm,
+  `kid` resolution and the email-claim type check all ran against a token the
+  Worker genuinely had to validate, minted by a local stand-in issuer. Nothing
+  in the Worker was modified or bypassed to make this work.
+- **The identity boundary.** A request carrying a forged `X-Wall-User`
+  alongside a valid token was logged under the token's email, not the forged
+  one.
+- **The public-bundle exposure.** With no Access application in front, `/`,
+  `/config` and `/static/player.js` all returned 200 to an unauthenticated
+  request while `/api/config` returned 401. This is not a theory; see step 3.
 
-   Still unbuilt by `wrangler` itself: this was `docker build`, not
-   `wrangler deploy`, so the push to Cloudflare's registry is unexercised.
-2. **The WebSocket upgrade through the Worker has never executed.** Docker was
-   down throughout, so no socket was ever opened through `worker/index.ts`.
-   The code takes the plainest available shape: an upgrade is authenticated and
-   then forwarded **unmodified** to the container stub, and the response is
-   returned **unwrapped** so a 101's `response.webSocket` survives. The socket
-   carries no identity, so it needs none of the header rebuilding the HTTP
-   paths do. That is the pattern Cloudflare's own examples use and the one
-   `@cloudflare/containers` handles explicitly — but it is still unobserved.
-   If the wall renders but never reacts to a config change, suspect this
-   before anything else. Verification check 4 below is what catches it.
-3. **JWT verification has never met a live Access application.** The algorithm,
-   issuer and audience checks are all pinned, but no real token has been through
-   them.
-4. **The optional `/healthz` bypass application has never been built.** The
-   claim in step 4 that Access resolves by longest-path match, so a
-   path-scoped application wins over the hostname-wide one, comes from
-   Cloudflare's documentation and nothing here has tested it. It affects only
-   that optional extra, never the main path.
+### Still unverified, and only your deploy can settle it
 
-None of this is a reason not to deploy. It is a reason to run the verification
-section honestly rather than skim it.
+1. **`wrangler deploy` itself.** The image was built by `docker build` and by
+   `wrangler dev`, never pushed to Cloudflare's registry.
+2. **Real Cloudflare Access.** The token above came from a local issuer
+   matching Access's documented shape. Nothing has met a real Access
+   application, a real team domain, or a real AUD tag.
+3. **Real R2.** The store ran against MinIO over the same S3 API, including
+   the conditional write the quota ledger depends on, but not against R2.
+4. **The custom domain and its certificate.**
+5. **The optional `/healthz` bypass application.** The longest-path-match
+   claim in step 4 comes from Cloudflare's documentation and has never been
+   built.
+
+### Running the whole stack yourself
+
+Docker and Node are all you need -- no Cloudflare account:
+
+```bash
+# 1. An S3-compatible store standing in for R2.
+docker run -d --name ytm-minio -p 19000:9000 \
+  -e MINIO_ROOT_USER=ytmtest -e MINIO_ROOT_PASSWORD=ytmtestsecret \
+  minio/minio:latest server /data
+
+# 2. Create the bucket (any S3 client; boto3 from this repo's venv works).
+
+# 3. Point the container at it. R2_ENDPOINT_URL is the only knob that makes
+#    this possible -- unset, as in production, it means real R2.
+#    Add to .env:  R2_ACCOUNT_ID=local
+#                  R2_ACCESS_KEY_ID=ytmtest
+#                  R2_SECRET_ACCESS_KEY=ytmtestsecret
+#                  R2_ENDPOINT_URL=http://host.docker.internal:19000
+
+npm run build && npx wrangler dev --port 18787
+```
+
+`/`, `/config` and `/healthz` answer immediately. `/api/*` and `/ws` return 401
+until you present a token, which is the point -- to exercise those you need an
+Access token or a local stand-in issuer serving a JWKS at
+`<team-domain>/cdn-cgi/access/certs`, with `--var ACCESS_TEAM_DOMAIN:...
+--var ACCESS_POLICY_AUD:...` pointed at it.
 
 ## Prerequisites
 

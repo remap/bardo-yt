@@ -28,6 +28,13 @@ export class Wall extends Container {
     R2_ACCESS_KEY_ID: env.R2_ACCESS_KEY_ID,
     R2_SECRET_ACCESS_KEY: env.R2_SECRET_ACCESS_KEY,
     R2_BUCKET: env.R2_BUCKET,
+    // Empty in production, which container.py reads as "use real R2".
+    // Set only to point this image at a local S3-compatible store, which is
+    // the sole way to exercise the whole stack under `wrangler dev` without
+    // a Cloudflare account. Without it nobody can run the packaged server
+    // end to end, which is how this project once shipped an image that had
+    // never been built.
+    R2_ENDPOINT_URL: env.R2_ENDPOINT_URL ?? "",
     YTMATRIX_GLOBAL_DAILY_UNITS: env.YTMATRIX_GLOBAL_DAILY_UNITS,
   };
 }
