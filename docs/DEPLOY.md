@@ -125,7 +125,22 @@ Access token or a local stand-in issuer serving a JWKS at
   Cloudflare). If your domain is different, change the `routes` pattern in
   `wrangler.jsonc` to match.
 - A **Workers Paid** plan. Containers and Durable Objects are not on the free
-  tier.
+  tier. **Check this before deploying**, because `wrangler deploy` does not:
+  it uploads the assets, uploads the Worker, builds the image, and only then
+  fails with a bare `✘ [ERROR] Unauthorized` and no explanation. This prints
+  the real reason:
+
+  ```bash
+  npx wrangler containers list
+  # free plan -> "Unauthorized: You do not have access to Cloudflare
+  #               Containers. Deploying containers requires the Workers Paid
+  #               plan."
+  ```
+
+  Upgrade at <https://dash.cloudflare.com/?to=/:account/workers/plans>. A
+  failed deploy leaves the Worker script uploaded but with no route and no
+  DNS record, so nothing is served and the next successful deploy overwrites
+  it.
 - **Docker running locally.** `wrangler deploy` builds the container image and
   pushes it to Cloudflare's registry, so the Docker daemon must be up — it will
   refuse even a `--dry-run` otherwise (see below). Start Docker Desktop, or

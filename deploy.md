@@ -3,7 +3,7 @@
 Commands and dashboard actions only. The reasoning, the verification steps and
 the troubleshooting table are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
-**🖥 = browser, not CLI.** Four steps need the dashboard; nothing else does.
+**🖥 = browser, not CLI.** Five steps need the dashboard; nothing else does.
 
 ---
 
@@ -29,19 +29,26 @@ the troubleshooting table are in [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 ## 0. Before you start
 
-- Docker Desktop **running** (`wrangler deploy` builds the image).
-- Workers **Paid** plan.
-- 🖥 **R2 enabled once on the account** — dashboard → **R2** → accept terms.
-  Without this, step 2 fails.
-- `jburke.io` on Cloudflare. Different domain → edit `routes` in
-  `wrangler.jsonc`.
-
 ```bash
-cd .claude/worktrees/feat-cloudflare-deploy   # until the PR is merged
 npm install
 npx wrangler login
-npx wrangler whoami                            # confirm the right account
+npx wrangler whoami          # confirm the right account
+
+# Check the plan BEFORE deploying. On the free plan this prints the real
+# reason; `npm run deploy` only says "Unauthorized", and not until after it
+# has uploaded the assets, the Worker and built the image.
+npx wrangler containers list
 ```
+
+- 🖥 **Workers Paid plan** — Containers and Durable Objects are not on the free
+  tier. If `containers list` says *"You do not have access to Cloudflare
+  Containers"*, upgrade at
+  <https://dash.cloudflare.com/?to=/:account/workers/plans> (~$5/mo).
+- 🖥 **R2 enabled once on the account** — dashboard → **R2** → accept terms.
+  Otherwise step 2 fails.
+- **Docker Desktop running** — `wrangler deploy` builds the image.
+- `jburke.io` on Cloudflare. Different domain → edit `routes` in
+  `wrangler.jsonc`.
 
 ## 1. 🖥 Create the Access application *first*
 
@@ -56,17 +63,17 @@ Zero Trust → **Access** → **Applications** → **Add an application** →
 
 Add a policy: **Allow**, Include → **Emails** → your 5–10 addresses.
 
-Then capture two values:
+Capture two values:
 
-- **AUD tag** — on the application's overview page.
-- **Team domain** — Zero Trust → **Settings** → looks like
+- **AUD tag** — the application's overview page.
+- **Team domain** — Zero Trust → **Settings**, like
   `https://yourteam.cloudflareaccess.com`. **Scheme, no trailing slash.**
 
 > Cloudflare may refuse an application for a hostname with no DNS record yet.
-> If it does, skip to step 2 and come back after step 5 — but do it
-> **immediately**, because until this exists `https://yt.bardo.jburke.io/`
-> serves the wall's HTML and JS to anyone. Only `/api/*`, `/ws` and `/healthz`
-> reach the Worker; nothing else is behind its 401.
+> If so, come back to this straight after step 3 — but do it **immediately**,
+> because until it exists `https://yt.bardo.jburke.io/` serves the wall's HTML
+> and JS to anyone. Only `/api/*`, `/ws` and `/healthz` reach the Worker;
+> nothing else is behind its 401.
 
 ## 2. R2 bucket
 
@@ -81,16 +88,28 @@ Dashboard → **R2** → **API** → **Manage API Tokens** → **Create API Toke
 - Permission: **Object Read & Write**
 - Scope: the `yt-matrix` bucket
 
-Capture, the secret is shown once:
+Capture — the secret is shown once:
 
 - **Access Key ID**
 - **Secret Access Key**
 - **Account ID** (R2 overview page, or your dashboard URL)
 
-## 4. Secrets
+## 4. First deploy
 
-Five, all prompted. Set `GEMINI_API_KEY` to a placeholder if you have no key —
-New query then fails 502 instead of a clean 503, but nothing else breaks.
+This creates the Worker, so the secrets in step 5 have something to attach to.
+
+```bash
+npm run deploy
+```
+
+The container will crash on its first request until step 5 — that is expected.
+It aborts startup with `RuntimeError: R2_ACCOUNT_ID is not set` rather than
+limping along on missing credentials.
+
+## 5. Secrets
+
+Five, each prompted. Use a placeholder for `GEMINI_API_KEY` if you have no key —
+New query then fails 502 instead of a clean 503, and nothing else changes.
 
 ```bash
 npx wrangler secret put YOUTUBE_API_KEY
@@ -100,10 +119,10 @@ npx wrangler secret put R2_ACCESS_KEY_ID
 npx wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
-## 5. Wire in the Access values
+## 6. Wire in the Access values
 
-Edit `wrangler.jsonc` → `vars`, replacing both `REPLACE-ME`s with what you
-captured in step 1:
+Edit `wrangler.jsonc` → `vars`, replacing both `REPLACE-ME`s with step 1's
+values:
 
 ```jsonc
 "ACCESS_TEAM_DOMAIN": "https://yourteam.cloudflareaccess.com",
@@ -112,34 +131,33 @@ captured in step 1:
 
 Leave `R2_BUCKET` and `YTMATRIX_GLOBAL_DAILY_UNITS` alone.
 
-## 6. Deploy
+## 7. Redeploy
+
+Secrets and `vars` both need a deploy to take effect.
 
 ```bash
-npm run deploy        # builds dist/, builds the image, creates the DNS record
+npm run deploy
 ```
 
-Certificate issuance takes a minute or two.
-
-## 7. Verify
+## 8. Verify
 
 ```bash
 curl https://yt.bardo.jburke.io/healthz          # {"status":"ok"} — Worker only
-curl -sI https://yt.bardo.jburke.io/ | head -1   # must NOT be 200; Access should
-                                                 # redirect or 401/403
+curl -sI https://yt.bardo.jburke.io/ | head -1   # must NOT be 200
 curl -sI https://yt.bardo.jburke.io/api/config | head -1   # likewise
 ```
 
-A `200` on either of the last two means Access is not in front. Fix that before
+A `200` on either of the last two means Access is not in front. Fix before
 anything else.
 
-Then in a browser, two profiles signed in as two different users:
+Then in a browser, two profiles signed in as different users:
 
-1. Open the wall in both — each should show the shared config query.
+1. Open the wall in both — each shows the shared config query.
 2. Press **New query** in one. **The other must not change.**
-3. Reload the first. Same query, and `units_spent_today` unmoved.
+3. Reload the first. Same query, `units_spent_today` unmoved.
 4. Change `grid.cols` on the config page. Both re-lay-out, each keeping its own
-   query. **If they re-lay-out but never react, the WebSocket is not getting
-   through** — that is the one path a real deploy tests first.
+   query. **If they never react, the WebSocket is not getting through** — the
+   one path only a real deploy tests.
 
 ## Afterwards
 
