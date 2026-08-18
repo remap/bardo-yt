@@ -19,7 +19,14 @@ class ConnectionManager:
     async def broadcast(self, message: dict) -> None:
         payload = json.dumps(message)
         stale: list[WebSocket] = []
-        for connection in self._connections:
+        # Iterate a snapshot, not the live set. Every `await` below is a
+        # suspension point, so with several users connected a tab opening or
+        # closing mid-broadcast mutated the set underneath this loop and raised
+        # `RuntimeError: Set changed size during iteration` -- which abandoned
+        # the broadcast partway, leaving some walls un-updated, and propagated
+        # out of `put_config` as a 500. Somebody else opening a tab could fail
+        # your save.
+        for connection in list(self._connections):
             try:
                 await connection.send_text(payload)
             except Exception:  # noqa: BLE001 - any per-connection failure marks it stale

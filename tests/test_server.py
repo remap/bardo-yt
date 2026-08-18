@@ -742,7 +742,40 @@ def test_filtering_can_be_turned_off(app_env, monkeypatch):
     assert body["video_ids"] == ids[:8], "filtering was applied despite being disabled"
 
 
-def test_scoring_stays_shallow_rather_than_measuring_all_fifty(app_env, monkeypatch):
+def test_a_moving_query_measures_only_the_grid(app_env, monkeypatch):
+    """Scoring widens in waves and stops as soon as the wall can be filled.
+
+    Three image fetches per video, so measuring the grid plus the whole scan
+    depth was ~96 fetches for a wall of eight -- 3.3s on Cloudflare against
+    0.22s on a laptop. Most queries are mostly-moving, so the first wave is
+    usually enough and the rest is never fetched.
+    """
+    app, default_path, store = app_env
+    seed_cache(store)
+    default_path.write_text(
+        yaml.safe_dump({**VALID, "filtering": {"skip_static": True, "scan_depth": 16}})
+    )
+    measured = []
+
+    async def all_moving(video_id, index, client):
+        measured.append(video_id)
+        return 30.0
+
+    monkeypatch.setattr(server, "motion_score", all_moving)
+    with TestClient(app) as client:
+        client.get("/api/videos")
+
+    # The grid, and not one more: eight moving videos fill eight cells.
+    assert len(measured) == 8
+
+
+def test_a_static_query_widens_but_never_past_the_ceiling(app_env, monkeypatch):
+    """The old depth is now a ceiling rather than a target.
+
+    A query with nothing moving in it costs exactly what it always did -- and
+    still refuses to measure all fifty, which would be 150 fetches for a wall
+    of eight.
+    """
     app, default_path, store = app_env
     seed_cache(store)
     default_path.write_text(
@@ -750,16 +783,19 @@ def test_scoring_stays_shallow_rather_than_measuring_all_fifty(app_env, monkeypa
     )
     measured = []
 
-    async def counting_score(video_id, store, client):
+    async def all_static(video_id, index, client):
         measured.append(video_id)
-        return 30.0
+        return 0.5  # below any sane static_threshold
 
-    monkeypatch.setattr(server, "motion_score", counting_score)
+    monkeypatch.setattr(server, "motion_score", all_static)
     with TestClient(app) as client:
-        client.get("/api/videos")
+        response = client.get("/api/videos")
 
-    # grid (8) + scan_depth (4). Measuring all 50 would be 150 image fetches.
+    # grid (8) + scan_depth (4), and it stops there rather than scanning all 50.
     assert len(measured) == 12
+    # Nothing moving, so the wall relaxes and uses the liveliest stills rather
+    # than leaving cells empty (gotcha 16).
+    assert response.json()["static_relaxed"] > 0
 
 
 def test_settings_require_an_api_key(monkeypatch):
@@ -1277,3 +1313,35 @@ def test_the_html_routes_are_gone(app_env):
     with TestClient(app) as client:
         assert client.get("/").status_code == 404
         assert client.get("/config").status_code == 404
+
+
+def test_a_generation_reports_how_long_gemini_took(generating_env, monkeypatch):
+    """The Gemini call happens in the route, before there is a query to resolve,
+    so `videos_for` cannot time it -- but it is the phase most likely to be the
+    one somebody is waiting on, and it has to reach the browser to be useful."""
+    app, _, _ = generating_env
+    stub_search(monkeypatch)
+
+    async def fake_generate(theme, avoid, model, api_key=None, *, instruction=None, client=None):
+        return "shoegaze motown covers"
+
+    monkeypatch.setattr(gemini, "generate_query", fake_generate)
+    with TestClient(app) as client:
+        body = client.post("/api/new-query").json()
+
+    timings = body["timings"]
+    assert "gemini" in timings, "a generation must report its Gemini time"
+    assert timings["gemini"] >= 0
+    # And the phases this function does measure are still there.
+    assert "total" in timings
+
+
+def test_a_plain_resolution_reports_no_gemini_phase(app_env):
+    """Nothing generated, so there is nothing to report -- an absent key rather
+    than a zero, which would read as "Gemini ran and was instant"."""
+    app, _, store = app_env
+    seed_cache(store)
+    with TestClient(app) as client:
+        timings = client.get("/api/videos").json()["timings"]
+    assert "gemini" not in timings
+    assert "total" in timings

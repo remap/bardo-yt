@@ -26,7 +26,11 @@
     white-space: nowrap; flex: none;
   }
   button:hover { background: #26262d; }
-  #status { color: #8a8a94; flex: 1 1 auto; min-width: 0;
+  /* min-width, not 0: this line reports the query, the cache state, the quota
+     and every error, and `flex: 1 1 auto; min-width: 0` let it shrink to zero
+     width and vanish silently once the header gained one more control. It
+     ellipsizes instead. */
+  #status { color: #8a8a94; flex: 1 1 auto; min-width: 9em;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #status[data-state="error"] { color: #e0685f; }
   #status[data-state="busy"] { color: #d8a657; }
@@ -104,20 +108,20 @@
 </head>
 <body>
   <header>
-    <button id="play">Play all</button>
-    <button id="pause">Pause all</button>
-    <button id="mute">Unmute all</button>
-    <button id="rewind" title="Send every cell back to the start.">Rewind all</button>
+    <button id="play">Play</button>
+    <button id="pause">Pause</button>
+    <button id="mute">Unmute</button>
+    <button id="rewind" title="Send every cell back to the start.">Rewind</button>
     <button id="shuffle" title="New videos from the same query. Costs no quota; a reload restores the ranked order.">
       Shuffle
     </button>
     <button id="reset-view" title="Clear zoom and pan on every cell.">Reset view</button>
-    <button id="new-query" title="Invents a new query with Gemini. Costs 100 quota units.">
-      New query
+    <button id="new-query" title="Invents a new query with Gemini from the box to the right, or from the standing theme if it is empty. Costs 100 quota units.">
+      Query:
     </button>
     <input id="prompt" type="text" spellcheck="false"
-           placeholder="steer the next query… (Enter)"
-           title="A metaprompt: Gemini turns this into a search query using the app's guidance. Costs 100 quota units.">
+           placeholder="optional steer — leave blank for the theme alone"
+           title="A metaprompt: Gemini turns this into a search query using the app's guidance. Press Query: to run it. Costs 100 quota units.">
     <label id="follow-label" title="When off, a new query loads paused and waits for you.">
       <input type="checkbox" id="follow"> follow play state
     </label>

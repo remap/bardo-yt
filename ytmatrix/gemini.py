@@ -6,6 +6,9 @@ YouTube. The caller passes primitives and gets a query string back.
 
 from __future__ import annotations
 
+import logging
+import time
+
 from google import genai
 from google.genai import types
 from pydantic import BaseModel
@@ -67,6 +70,9 @@ class QueryGenerationError(RuntimeError):
     """Gemini did not return a usable query."""
 
 
+logger = logging.getLogger(__name__)
+
+
 def build_prompt(theme: str, avoid: list[str], instruction: str | None = None) -> str:
     recent = avoid[-MAX_AVOID_ENTRIES:]
     parts = [f"Theme: {theme}"]
@@ -79,7 +85,22 @@ def build_prompt(theme: str, avoid: list[str], instruction: str | None = None) -
             "The operator has asked for this specifically, and it takes "
             f"precedence over the theme:\n{instruction}"
         )
-    if recent:
+    # The avoid-list is suppressed whenever the operator has steered, and that
+    # is the whole point of the branch above: a steer that "takes precedence
+    # over the theme" cannot also lose to a list of things not to say.
+    #
+    # It fought the steer badly in practice. The list is per-browser
+    # localStorage history, so the same steer produced different queries on
+    # different origins -- ask for "golden fingerstyle cover" from a browser
+    # that had already generated golden queries and Gemini dutifully avoided
+    # golden, returning fingerstyle covers of other songs. Measured: with an
+    # empty list the steer came back verbatim 2 of 3 times; with five golden
+    # entries it never did, and dropped golden entirely 1 of 3.
+    #
+    # Repeats are fine when they were asked for. Repeating a steer is also
+    # nearly free -- the same query is a search cache hit, so it spends the
+    # Gemini call and no quota.
+    if recent and not instruction:
         parts.append("Avoid these, already used:\n" + "\n".join(f"- {q}" for q in recent))
     parts.append("Invent one new search query.")
     return "\n\n".join(parts)
@@ -96,6 +117,7 @@ async def generate_query(
 ) -> str:
     client = client or genai.Client(api_key=api_key)
     prompt = build_prompt(theme, avoid, instruction)
+    started = time.monotonic()
     try:
         response = await client.aio.models.generate_content(
             model=model,
@@ -103,6 +125,20 @@ async def generate_query(
             config=types.GenerateContentConfig(
                 response_mime_type="application/json",
                 response_schema=GeneratedQuery,
+                # Pinned, because the default is DYNAMIC and this task does not
+                # need it. Measured on gemini-3.6-flash: the default spent 730
+                # then 285 thinking tokens on consecutive calls to produce a
+                # ~50-token query, taking 5.3s and then 2.8s -- the swing is
+                # what makes New query feel unpredictable rather than merely
+                # slow. "minimal" removes thinking entirely: mean 1.43s over
+                # four calls, range 1.24-1.62s.
+                #
+                # Quality is unaffected, which matters because gotcha 25 rests
+                # on it: 8/8 generated queries still carried a cover word, so
+                # none of them would return an act's own official upload. If
+                # you raise this, re-check that -- a query naming an artist and
+                # song with no cover word is the one failure mode here.
+                thinking_config=types.ThinkingConfig(thinking_level="minimal"),
             ),
         )
     except Exception as exc:  # the SDK raises a wide, undocumented range
@@ -115,4 +151,16 @@ async def generate_query(
     query = spec.query.strip().strip('"').strip()
     if not query:
         raise QueryGenerationError("Gemini returned an empty query")
+    # Logged in full, deliberately. The steer is a metaprompt, so what actually
+    # reaches YouTube is whatever Gemini made of it -- and when the wall shows
+    # something unexpected, this line is the difference between "Gemini ignored
+    # me" and "Gemini said something reasonable and the search disagreed".
+    logger.info(
+        "gemini %.2fs model=%s avoid=%d steer=%r -> query=%r",
+        time.monotonic() - started,
+        model,
+        len(avoid) if not instruction else 0,
+        instruction,
+        query,
+    )
     return query

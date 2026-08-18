@@ -99,3 +99,26 @@ async def test_the_avoid_list_is_capped_so_the_prompt_cannot_grow_without_bound(
     sent = str(client.aio.models.calls[0]["contents"])
     assert "query 499" in sent, "the most recent queries must be the ones kept"
     assert "query 0" not in sent, "the oldest should have been dropped"
+
+
+async def test_a_steer_suppresses_the_avoid_list():
+    """An explicit steer beats the avoid-list, which is the whole point of it.
+
+    The avoid-list is per-browser localStorage history, so the same steer
+    produced different queries on different origins: ask for "golden fingerstyle
+    cover" from a browser that had already generated golden queries and Gemini
+    was told to avoid exactly what was being asked for.
+    """
+    prompt = gemini.build_prompt(
+        "k-pop covers", ["golden fingerstyle cover"], "golden fingerstyle cover"
+    )
+    assert "Avoid these" not in prompt
+    assert "golden fingerstyle cover" in prompt
+
+
+async def test_the_avoid_list_still_applies_without_a_steer():
+    """Empty box means "invent something from the theme", and that is exactly
+    when not repeating yourself matters."""
+    prompt = gemini.build_prompt("k-pop covers", ["twice fancy dance cover"], None)
+    assert "Avoid these" in prompt
+    assert "twice fancy dance cover" in prompt

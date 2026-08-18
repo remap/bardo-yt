@@ -3,7 +3,7 @@ import pytest
 from botocore.awsrequest import AWSResponse
 from botocore.exceptions import ClientError
 
-from ytmatrix.store import FileStore, R2Store, r2_client
+from ytmatrix.store import FileStore, MemoStore, R2Store, r2_client
 
 
 @pytest.fixture
@@ -188,3 +188,90 @@ async def test_r2_get_missing_key_returns_none(r2):
     store, _, set_response = r2
     set_response(404, _NO_SUCH_KEY)
     assert await store.get("missing") is None
+
+
+class _CountingStore:
+    """Counts reads that actually reach the wrapped store."""
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.gets = 0
+
+    async def get(self, key):
+        self.gets += 1
+        return await self._inner.get(key)
+
+    async def put(self, key, data):
+        return await self._inner.put(key, data)
+
+    async def get_with_version(self, key):
+        return await self._inner.get_with_version(key)
+
+    async def put_if_version(self, key, data, version):
+        return await self._inner.put_if_version(key, data, version)
+
+    async def list_keys(self, prefix):
+        return await self._inner.list_keys(prefix)
+
+
+async def test_memostore_seeds_the_memo_on_write(tmp_path):
+    """motion/, origin/ and contentbox/ are immutable per video, and
+    select_videos re-reads ~80 of them on every request. Against R2 each is a
+    round trip, so a warm process must not pay for them twice."""
+    counted = _CountingStore(FileStore(tmp_path))
+    store = MemoStore(counted)
+
+    await store.put("motion/abc.json", b'{"score": 12}')
+    assert await store.get("motion/abc.json") == b'{"score": 12}'
+    assert await store.get("motion/abc.json") == b'{"score": 12}'
+    assert counted.gets == 0
+
+
+async def test_memostore_reads_through_once_then_memoises(tmp_path):
+    inner = FileStore(tmp_path)
+    await inner.put("origin/abc.json", b'{"country": "KR"}')
+    counted = _CountingStore(inner)
+    store = MemoStore(counted)
+
+    for _ in range(5):
+        assert await store.get("origin/abc.json") == b'{"country": "KR"}'
+    assert counted.gets == 1
+
+
+async def test_memostore_never_memoises_config_or_the_ledger(tmp_path):
+    """Config is edited at runtime and the ledger has many writers; a stale
+    copy of either is a correctness bug, not a saved round trip."""
+    inner = FileStore(tmp_path)
+    counted = _CountingStore(inner)
+    store = MemoStore(counted)
+
+    await inner.put("config.yaml", b"query: one")
+    assert await store.get("config.yaml") == b"query: one"
+    await inner.put("config.yaml", b"query: two")
+    assert await store.get("config.yaml") == b"query: two"
+
+    await inner.put("_budget.json", b'{"units": 100}')
+    assert await store.get("_budget.json") == b'{"units": 100}'
+    await inner.put("_budget.json", b'{"units": 200}')
+    assert await store.get("_budget.json") == b'{"units": 200}'
+    assert counted.gets == 4
+
+
+async def test_memostore_does_not_memoise_the_search_cache(tmp_path):
+    """search/ entries expire, and cache.read has to be able to see that."""
+    inner = FileStore(tmp_path)
+    counted = _CountingStore(inner)
+    store = MemoStore(counted)
+    await inner.put("search/abc.json", b"{}")
+    await store.get("search/abc.json")
+    await store.get("search/abc.json")
+    assert counted.gets == 2
+
+
+async def test_memostore_passes_compare_and_swap_straight_through(tmp_path):
+    """The ledger's CAS must reach the real store or it guards nothing."""
+    store = MemoStore(FileStore(tmp_path))
+    assert await store.put_if_version("_budget.json", b"a", None) is True
+    assert await store.put_if_version("_budget.json", b"b", None) is False
+    found = await store.get_with_version("_budget.json")
+    assert found is not None and found[0] == b"a"

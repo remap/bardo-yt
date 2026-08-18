@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -15,7 +17,22 @@ from ytmatrix.store import FileStore
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _configure_logging() -> None:
+    """INFO to stderr, which is what Cloudflare captures from a container.
+
+    Without this, Python's handler of last resort emits WARNING and above only,
+    so every INFO line would vanish -- including the per-phase timings that say
+    where a slow query actually spent its time.
+    """
+    logging.basicConfig(
+        level=os.environ.get("YTMATRIX_LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        stream=sys.stderr,
+    )
+
+
 def main() -> None:
+    _configure_logging()
     # Constructing Settings raises immediately if YOUTUBE_API_KEY is absent,
     # which is the point: fail at startup, not at the first search.
     settings = Settings()

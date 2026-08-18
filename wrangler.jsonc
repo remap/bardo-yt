@@ -36,8 +36,8 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Wall"] }],
 
   "vars": {
-    "ACCESS_TEAM_DOMAIN": "https://REPLACE-ME.cloudflareaccess.com",
-    "ACCESS_POLICY_AUD": "REPLACE-ME",
+    "ACCESS_TEAM_DOMAIN": "https://jburke-io.cloudflareaccess.com",
+    "ACCESS_POLICY_AUD": "4a5620370c88c6c79fc83a4f185216a07c44447d5f1565c338a829730d1d4d69",
     "R2_BUCKET": "yt-matrix",
     "YTMATRIX_GLOBAL_DAILY_UNITS": "10000"
   },

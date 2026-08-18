@@ -136,6 +136,24 @@ export default {
     headers.delete("x-wall-user");
     headers.set("X-Wall-User", email);
 
+    // The YouTube Data API infers a region from the CALLER's address when no
+    // regionCode is given, so the same query ranked differently from a laptop
+    // than from whichever datacenter this container woke up in. Cloudflare
+    // already knows where the browser is, which is a better answer than
+    // anything the page could work out for itself, so pass it through and let
+    // the container pin regionCode with it.
+    //
+    // Stripped first for the same reason as the identity above: it feeds a
+    // parameter that shapes what everyone sees, so it comes from the edge and
+    // not from the client.
+    headers.delete("x-wall-region");
+    const country = (request.cf?.country as string | undefined)?.trim();
+    // "T1" is Cloudflare's marker for Tor exits, and XX means unknown; neither
+    // is a region YouTube would accept.
+    if (country && country !== "T1" && country !== "XX") {
+      headers.set("X-Wall-Region", country.toUpperCase());
+    }
+
     // A constant name, so every user lands on the same instance.
     //
     // Rebuilt rather than mutated: inbound headers are immutable in Workers,

@@ -45,6 +45,11 @@ CONFIG = {
     },
     "playback": {"muted": True, "autoplay_on_change": True, "start_offset": 0, "loop": True},
     "cache": {"ttl_hours": 24},
+    # Enabled so the New query button is visible: player.js hides it when
+    # generation is off, and the model default is off. It only un-hides the
+    # button -- nothing here generates unless a test clicks it, and the tests
+    # that do intercept the request rather than letting it reach Gemini.
+    "query_generation": {"enabled": True},
 }
 
 
@@ -258,18 +263,18 @@ def test_the_wall_starts_muted_and_the_button_unmutes_every_player(running_serve
             "window.__players?.every(p => typeof p?.isMuted === 'function')", timeout=25_000
         )
 
-        assert page.locator("#mute").text_content().strip() == "Unmute all"
+        assert page.locator("#mute").text_content().strip() == "Unmute"
         assert page.evaluate("window.__players.every(p => p.isMuted())"), "should start muted"
 
         page.wait_for_function("window.__prerolled === true", timeout=40_000)
         page.click("#play")
         page.click("#mute")
         page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=15_000)
-        assert page.locator("#mute").text_content().strip() == "Mute all"
+        assert page.locator("#mute").text_content().strip() == "Mute"
 
         page.click("#mute")
         page.wait_for_function("window.__players.every(p => p.isMuted())", timeout=15_000)
-        assert page.locator("#mute").text_content().strip() == "Unmute all"
+        assert page.locator("#mute").text_content().strip() == "Unmute"
         browser.close()
 
 
@@ -469,7 +474,8 @@ def test_right_click_on_an_empty_cell_does_nothing(running_server):
         browser.close()
 
 
-def test_the_prompt_box_sends_a_metaprompt_on_enter(running_server):
+def test_the_new_query_button_carries_the_prompt(running_server):
+    """The button is the only trigger, and it sends whatever is in the box."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_context(ignore_https_errors=True).new_page()
@@ -485,17 +491,19 @@ def test_the_prompt_box_sends_a_metaprompt_on_enter(running_server):
             )[-1],
         )
         page.fill("#prompt", "sadder, more piano")
-        page.press("#prompt", "Enter")
-        page.wait_for_function("Object.keys(window).length >= 0", timeout=2_000)
+        page.click("#new-query")
         page.wait_for_timeout(1200)
 
-        assert sent, "Enter did not trigger a request"
+        assert sent, "the button did not trigger a request"
         assert '"prompt"' in sent["body"]
         assert "sadder, more piano" in sent["body"]
         browser.close()
 
 
-def test_an_empty_prompt_does_not_spend_quota(running_server):
+def test_enter_in_the_prompt_box_does_nothing(running_server):
+    """Removed deliberately: a 100-unit search should take a click, not a
+    keystroke in a field that happens to have focus. Guarding it so the
+    handler cannot come back unnoticed."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_context(ignore_https_errors=True).new_page()
@@ -504,11 +512,38 @@ def test_an_empty_prompt_does_not_spend_quota(running_server):
 
         calls = []
         page.route("**/api/new-query", lambda route: (calls.append(1), route.abort())[-1])
-        page.fill("#prompt", "   ")
+        page.fill("#prompt", "sadder, more piano")
         page.press("#prompt", "Enter")
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1200)
 
-        assert calls == [], "whitespace should never trigger a 100-unit generation"
+        assert calls == [], "Enter must not spend 100 units"
+        browser.close()
+
+
+def test_an_empty_box_generates_from_the_theme_alone(running_server):
+    """An empty box is not an error -- it means "no steer", and the server
+    records that as `generated` rather than `manual`. Whitespace is normalised
+    away rather than sent as a prompt of spaces."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        sent = {}
+        page.route(
+            "**/api/new-query",
+            lambda route: (
+                sent.update({"body": route.request.post_data}),
+                route.fulfill(status=409, json={"detail": "stubbed"}),
+            )[-1],
+        )
+        page.fill("#prompt", "   ")
+        page.click("#new-query")
+        page.wait_for_timeout(1200)
+
+        assert sent, "an empty box should still generate from the theme"
+        assert '"prompt"' not in sent["body"], "whitespace must not travel as a prompt"
         browser.close()
 
 

@@ -127,7 +127,7 @@ class FilteringConfig(Strict):
     static_threshold: float = Field(default=3.5, ge=0)
     # How many extra candidates to measure beyond the grid size, so there is
     # something to substitute in when the top results turn out to be stills.
-    scan_depth: int = Field(default=24, ge=0)
+    scan_depth: int = Field(default=16, ge=0)
 
 
 class QuotaConfig(Strict):

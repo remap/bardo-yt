@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
@@ -19,16 +23,21 @@ from ytmatrix import (
     youtube,
 )
 from ytmatrix.config import DEFAULT_CONFIG_PATH, Config, load_config, merge_config, save_config
+from ytmatrix.derived import DerivedIndex
 from ytmatrix.settings import Settings
-from ytmatrix.store import Store
+from ytmatrix.store import MemoStore, Store
 from ytmatrix.ws import ConnectionManager
+
+logger = logging.getLogger(__name__)
 
 
 class BudgetExceededError(RuntimeError):
     """The self-imposed daily ceiling would be crossed by another search."""
 
 
-def search_params_for(config: Config, query: str | None = None) -> dict[str, str]:
+def search_params_for(
+    config: Config, query: str | None = None, region_code: str | None = None
+) -> dict[str, str]:
     return youtube.build_params(
         query or config.query,
         config.search.order.value,
@@ -36,6 +45,7 @@ def search_params_for(config: Config, query: str | None = None) -> dict[str, str
         config.search.safe_search.value,
         config.search.relevance_language,
         config.search.video_license.value,
+        region_code,
     )
 
 
@@ -47,6 +57,7 @@ async def resolve_videos(
     *,
     global_limit_units: int = budget.DAILY_QUOTA_UNITS,
     inflight: dict[str, asyncio.Lock] | None = None,
+    region_code: str | None = None,
 ) -> dict:
     """Return the video list for this config, spending quota only when required.
 
@@ -67,7 +78,7 @@ async def resolve_videos(
     Omitting `inflight` skips the guard entirely, which is what a lone caller
     -- a test, or a script -- wants.
     """
-    params = search_params_for(config, query)
+    params = search_params_for(config, query, region_code)
 
     items = await cache.read(store, params, config.cache.ttl_hours)
     if items is not None:
@@ -137,62 +148,65 @@ async def _search_and_cache(
     return {"items": items, "from_cache": False, "note": None}
 
 
-async def motion_score(video_id: str, store: Store, client: httpx.AsyncClient) -> float:
-    """Storyboard-frame motion score for one video, cached forever.
+async def motion_score(video_id: str, index: DerivedIndex, client: httpx.AsyncClient) -> float:
+    """Storyboard-frame motion score for one video, remembered forever.
 
     A video's shape never changes, and these thumbnails are not the Data API,
     so this costs no quota -- only three small image fetches, once per video.
-    """
-    key = f"motion/{video_id}.json"
-    raw = await store.get(key)
-    if raw is not None:
-        try:
-            cached = json.loads(raw)["score"]
-            result = motion.UNKNOWN_SCORE if cached is None else float(cached)
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            pass  # Re-measure rather than fail -- a corrupt entry is a miss.
-        else:
-            return result
 
-    async def frame(index: int) -> bytes | None:
+    The score lives in a shared in-memory index (see ytmatrix/derived.py) that
+    is loaded with one get and flushed behind the response, rather than in one
+    store object per video.
+    """
+    # `in`, not a None check. A stored null means "measured, and unmeasurable" --
+    # which counts as MOVING (gotcha 16), because dropping a legitimate result is
+    # worse than showing one still. Testing for None would read that as never
+    # measured and re-fetch three frames on every single request.
+    if video_id in index.entries:
+        cached = index.get(video_id)
+        if cached is None:
+            return motion.UNKNOWN_SCORE
         try:
-            response = await client.get(
-                motion.STORYBOARD_URL.format(video_id=video_id, index=index)
-            )
+            return float(cached)
+        except (TypeError, ValueError):
+            pass  # Re-measure rather than fail -- a corrupt entry is a miss.
+
+    async def frame(idx: int) -> bytes | None:
+        try:
+            response = await client.get(motion.STORYBOARD_URL.format(video_id=video_id, index=idx))
         except httpx.HTTPError:
             return None
         return response.content if response.status_code == 200 else None
 
     fetched = await asyncio.gather(*(frame(i) for i in motion.STORYBOARD_INDICES))
     score = motion.score_frames([f for f in fetched if f])
-
-    await store.put(
-        key,
-        json.dumps({"score": score if score != motion.UNKNOWN_SCORE else None}).encode("utf-8"),
-    )
+    # UNKNOWN_SCORE is stored as null: an unmeasurable video counts as moving
+    # (gotcha 16), and that decision belongs to the reader, not the store.
+    index.set(video_id, None if score == motion.UNKNOWN_SCORE else score)
     return score
 
 
-async def video_countries(video_ids: list[str], store: Store, api_key: str) -> dict[str, str]:
+async def video_countries(
+    video_ids: list[str], index: DerivedIndex, api_key: str
+) -> dict[str, str]:
     """video id -> ISO country, for the ids we can resolve.
 
     Two batched calls at 1 unit each, versus 100 for the search itself.
-    Results are cached per video forever -- a video does not change origin.
+    Countries are remembered forever -- a video does not change origin -- in the
+    shared in-memory index rather than one store object per video, which is what
+    turned 50 gets and 50 puts into one of each behind the response.
+
     Any failure returns what it has: diversity is a preference, not a
     requirement, and must never stop the wall from resolving.
     """
     known: dict[str, str] = {}
     missing: list[str] = []
     for video_id in video_ids:
-        raw = await store.get(f"origin/{video_id}.json")
-        if raw is not None:
-            try:
-                country = json.loads(raw).get("country")
-                if country:
-                    known[video_id] = country
-                continue
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if video_id in index.entries:
+            country = index.get(video_id)
+            if country:
+                known[video_id] = country
+            continue
         missing.append(video_id)
 
     if not missing:
@@ -230,37 +244,111 @@ async def video_countries(video_ids: list[str], store: Store, api_key: str) -> d
         return known
 
     for video_id, country in resolved.items():
-        await store.put(f"origin/{video_id}.json", json.dumps({"country": country}).encode("utf-8"))
+        index.set(video_id, country)
         if country:
             known[video_id] = country
     return known
 
 
 async def select_videos(
-    config: Config, video_ids: list[str], store: Store, api_key: str = ""
+    config: Config,
+    video_ids: list[str],
+    motion_index: DerivedIndex,
+    origin_index: DerivedIndex,
+    api_key: str = "",
 ) -> dict:
     """Order the results so the wall shows things that move, from many places."""
     if not video_ids:
-        return {"slots": [], "reserves": [], "relaxed": 0}
+        return {"slots": [], "reserves": [], "relaxed": 0, "timings": {}}
 
     # Diversity first, motion second: motion.rank preserves the order it is
     # given among the videos it keeps, so spreading countries here survives
     # the static filter rather than being undone by it.
+    origin_secs = 0.0
+    resolved_countries = 0
     if config.filtering.prefer_country_diversity and api_key:
-        countries = await video_countries(video_ids, store, api_key)
+        started = time.monotonic()
+        countries = await video_countries(video_ids, origin_index, api_key)
+        origin_secs = time.monotonic() - started
+        resolved_countries = len(countries)
         video_ids = origin.diversify([(v, countries.get(v)) for v in video_ids])
 
     if not config.filtering.skip_static:
         cells = config.grid.cells
-        return {"slots": video_ids[:cells], "reserves": video_ids[cells:], "relaxed": 0}
+        return {
+            "slots": video_ids[:cells],
+            "reserves": video_ids[cells:],
+            "relaxed": 0,
+            "timings": {"origin": round(origin_secs, 2), "countries": resolved_countries},
+        }
 
-    # Measure only as deep as needed: the grid plus enough spares to substitute
-    # from. Scoring all 50 would mean 150 fetches for a wall of eight.
-    depth = min(len(video_ids), config.grid.cells + config.filtering.scan_depth)
-    head, tail = video_ids[:depth], video_ids[depth:]
+    # Measured in waves, widening only when the wall cannot be filled.
+    #
+    # Three frames per video, so scoring the grid plus the full scan depth was
+    # ~96 image fetches for a wall of eight -- 3.3s on Cloudflare against 0.22s
+    # on a laptop. Most queries are mostly-moving, so the first wave usually
+    # yields enough and the rest is never fetched. A query full of stills widens
+    # to exactly the old depth and costs exactly what it used to.
+    #
+    # This does not weaken the reserve pool's contract, because the pool never
+    # promised to be vetted: everything past `scan_depth` was already appended
+    # unmeasured (`tail` below). Waves only move the boundary between "measured"
+    # and "unmeasured" reserves, and gotcha 4's substitution works either way --
+    # a reserve that turns out to be a still is replaced on its own onError.
+    cells = config.grid.cells
+    depth = min(len(video_ids), cells + config.filtering.scan_depth)
+    scored: list[tuple[str, float]] = []
+    measured = 0
 
+    motion_started = time.monotonic()
     async with httpx.AsyncClient(timeout=10.0) as client:
-        scores = await asyncio.gather(*(motion_score(v, store, client) for v in head))
+        while measured < depth:
+            # First wave is the grid itself; later waves add half a grid at a
+            # time, so a mostly-static query converges without many round trips.
+            wave_size = cells if measured == 0 else max(1, cells // 2)
+            wave = video_ids[measured : min(depth, measured + wave_size)]
+            if not wave:
+                break
+            wave_scores = await asyncio.gather(
+                *(motion_score(v, motion_index, client) for v in wave)
+            )
+            scored.extend(zip(wave, wave_scores, strict=True))
+            measured += len(wave)
+            moving = sum(
+                1
+                for _, score in scored
+                if not motion.is_static(score, config.filtering.static_threshold)
+            )
+            if moving >= cells:
+                break
+    motion_secs = time.monotonic() - motion_started
+
+    head = [v for v, _ in scored]
+    tail = video_ids[measured:]
+    scores = [score for _, score in scored]
+
+    # One line per selection, because these two phases are where a slow wall
+    # actually spends its time and neither is visible from the outside. A near-
+    # exact 15s on `origin` means its httpx timeout expired and the countries
+    # came back empty -- which is swallowed on purpose (diversity is a
+    # preference) but silently changes WHICH videos reach the wall, since
+    # origin.diversify then has nothing to reorder by.
+    logger.info(
+        "select origin=%.2fs (%d/%d countries) motion=%.2fs (%d of %d measured)",
+        origin_secs,
+        resolved_countries,
+        len(video_ids),
+        motion_secs,
+        len(head),
+        depth,
+    )
+    timings = {
+        "origin": round(origin_secs, 2),
+        "countries": resolved_countries,
+        "motion": round(motion_secs, 2),
+        "measured": len(head),
+        "depth": depth,
+    }
 
     result = motion.rank(
         list(zip(head, scores, strict=True)),
@@ -268,6 +356,7 @@ async def select_videos(
         threshold=config.filtering.static_threshold,
     )
     result["reserves"] = result["reserves"] + tail
+    result["timings"] = timings
     return result
 
 
@@ -287,6 +376,11 @@ def videos_message(
         "from_cache": resolved["from_cache"],
         "note": note,
         "static_relaxed": selection["relaxed"],
+        # Phase timings, on the wire rather than only in the log. Container
+        # stdout is not reliably readable from outside a deployment, and the
+        # question these answer -- where did fifteen seconds go -- is asked
+        # from a browser.
+        "timings": selection.get("timings") or {},
         "units_spent_today": units_spent_today,
         "daily_limit_units": config.quota.daily_limit_units,
     }
@@ -298,13 +392,50 @@ def create_app(
     *,
     default_config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> FastAPI:
-    app = FastAPI(title="yt matrix")
     manager = ConnectionManager()
+
+    # Wrapped here rather than at the call sites so nothing downstream has to
+    # know: motion scores, origins and content boxes are immutable per video, so
+    # a warm container answers them from memory instead of paying an R2 round
+    # trip each on every resolution. See MemoStore for what it refuses to cache
+    # and why -- config and the quota ledger must always come off the wire.
+    store = MemoStore(store)
 
     # One lock per cache key currently being searched for, shared by every
     # request this process serves -- see `resolve_videos`. It lives here rather
     # than at module scope so two apps in one test session cannot collide.
     inflight: dict[str, asyncio.Lock] = {}
+
+    # Serialises the read-merge-write in `put_config`. Config is one shared
+    # document and a save reads it, merges the edit and writes it back across
+    # two awaits, so two people saving at the same moment would both read the
+    # same original and the second write would silently discard the first
+    # person's change. One process, so one lock is enough.
+    config_write_lock = asyncio.Lock()
+
+    # Motion scores and origins, one object each rather than one per video, held
+    # in memory and flushed behind the response. See ytmatrix/derived.py for why
+    # -- against R2 the per-video shape cost ~82 round trips on the critical
+    # path of every fresh query. Per-app rather than module-level so two apps in
+    # one test session cannot share state.
+    motion_index = DerivedIndex(store, "motion/index.json")
+    origin_index = DerivedIndex(store, "origin/index.json")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Flush the derived indexes on the way out, rather than losing them.
+
+        Cloudflare sends SIGTERM when the container goes to sleep, which cancels
+        any background flush still in flight -- so without this, whatever was
+        measured in the final minutes of a session is discarded and re-measured
+        on the next wake. Waiting is safe: the platform allows up to fifteen
+        minutes for a graceful exit and this needs two puts.
+        """
+        yield
+        await motion_index.aclose()
+        await origin_index.aclose()
+
+    app = FastAPI(title="yt matrix", lifespan=lifespan)
 
     def user_of(request: Request) -> str:
         """Who is asking, for the query log and nothing else.
@@ -315,10 +446,27 @@ def create_app(
         """
         return (request.headers.get("x-wall-user") or "").strip().lower()
 
+    def region_of(request: Request) -> str | None:
+        """Which region YouTube should rank for, from Cloudflare's view of the
+        browser.
+
+        Absent locally -- there is no Worker in front of `./run.sh` -- and that
+        is the right answer there: with no regionCode the API infers one from
+        the caller, which on a laptop is the operator's own country. Pinning it
+        in production is what makes the deployed wall agree with the local one
+        instead of ranking for whichever datacenter woke up.
+        """
+        raw = (request.headers.get("x-wall-region") or "").strip().upper()
+        # Two letters or nothing: anything else is not an ISO country and would
+        # make the API reject the whole search rather than ignore one parameter.
+        return raw if len(raw) == 2 and raw.isalpha() else None
+
     async def shared_config() -> Config:
         return await load_config(store, default_path=default_config_path)
 
-    async def usable_query(config: Config, query: str | None) -> tuple[str, list[dict] | None]:
+    async def usable_query(
+        config: Config, query: str | None, region_code: str | None = None
+    ) -> tuple[str, list[dict] | None]:
         """Which query to put on the wall, and the cached results to serve it.
 
         A query supplied by the browser is honoured only if the shared cache
@@ -349,7 +497,7 @@ def create_app(
         """
         if not query:
             return config.query, None
-        params = search_params_for(config, query)
+        params = search_params_for(config, query, region_code)
         cached = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
         if cached is None:
             return config.query, None
@@ -363,7 +511,14 @@ def create_app(
         email: str,
         prompt: str | None = None,
         cached: list[dict] | None = None,
+        region_code: str | None = None,
+        extra_timings: dict | None = None,
     ) -> dict:
+        # `extra_timings` carries phases this function cannot see -- currently
+        # the Gemini call, which happens in the route before a query exists to
+        # resolve. Reported on the wire rather than only in the log, because the
+        # question these answer gets asked from a browser.
+        started = time.monotonic()
         if cached is not None:
             # A query the caller supplied that the shared cache already holds.
             # Served from what usable_query found and never re-resolved, so
@@ -379,6 +534,7 @@ def create_app(
                     query,
                     global_limit_units=settings.global_daily_units,
                     inflight=inflight,
+                    region_code=region_code,
                 )
             except BudgetExceededError as exc:
                 raise HTTPException(status_code=429, detail=str(exc)) from exc
@@ -393,7 +549,21 @@ def create_app(
                 raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         video_ids = [item["video_id"] for item in resolved["items"]]
-        selection = await select_videos(config, video_ids, store, settings.youtube_api_key)
+        # Loaded lazily: one get each on a cold container, then never again.
+        await motion_index.load()
+        await origin_index.load()
+        selection = await select_videos(
+            config, video_ids, motion_index, origin_index, settings.youtube_api_key
+        )
+        # Behind the response, not in front of it. A lost flush costs a
+        # recomputation, which is what the first request paid anyway.
+        motion_index.schedule_flush()
+        origin_index.schedule_flush()
+        selection["timings"] = {
+            **(selection.get("timings") or {}),
+            **(extra_timings or {}),
+            "total": round(time.monotonic() - started, 2),
+        }
         message = videos_message(config, resolved, query, selection, await budget.spent(store))
 
         # Every resolution is logged, including plain reloads: the log is a
@@ -427,6 +597,10 @@ def create_app(
 
     @app.put("/api/config")
     async def put_config(payload: dict) -> dict:
+        async with config_write_lock:
+            return await _save_config(payload)
+
+    async def _save_config(payload: dict) -> dict:
         previous = await shared_config()
         try:
             # Merged, not replaced: an omitted section means "leave it alone".
@@ -482,7 +656,8 @@ def create_app(
     @app.get("/api/videos")
     async def get_videos(request: Request, query: str | None = None) -> dict:
         config = await shared_config()
-        chosen, cached = await usable_query(config, query)
+        region_code = region_of(request)
+        chosen, cached = await usable_query(config, query, region_code)
         return await videos_for(
             config,
             chosen,
@@ -491,6 +666,7 @@ def create_app(
             source="client" if cached is not None else "config",
             email=user_of(request),
             cached=cached,
+            region_code=region_code,
         )
 
     @app.get("/api/content-box/{video_id}")
@@ -584,6 +760,7 @@ def create_app(
         keep = config.query_generation.avoid_repeats
         avoid = [str(q) for q in raw_history[-keep:]] if keep else []
 
+        gemini_started = time.monotonic()
         try:
             query = await gemini.generate_query(
                 config.query_generation.theme,
@@ -594,6 +771,7 @@ def create_app(
             )
         except gemini.QueryGenerationError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        gemini_secs = round(time.monotonic() - gemini_started, 2)
 
         return await videos_for(
             config,
@@ -601,6 +779,8 @@ def create_app(
             source="manual" if prompt else "generated",
             email=user_of(request),
             prompt=prompt,
+            region_code=region_of(request),
+            extra_timings={"gemini": gemini_secs},
         )
 
     @app.websocket("/ws")

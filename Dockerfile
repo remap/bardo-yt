@@ -32,4 +32,9 @@ ENV PORT=8080
 # Required for `wrangler dev` to reach the container locally.
 EXPOSE 8080
 
-CMD ["uv", "run", "--no-dev", "python", "-m", "ytmatrix.container"]
+# The venv is already synced at build time, so invoke it directly. `uv run`
+# re-checks sync state and rebuilds the project on EVERY container start --
+# measured at ~0.5s of a ~3.4s cold start, for work whose only possible answer
+# is "already done". Cloudflare wakes this container from sleep on a request
+# somebody is waiting for, so that half-second is paid by a user.
+CMD ["/app/.venv/bin/python", "-m", "ytmatrix.container"]

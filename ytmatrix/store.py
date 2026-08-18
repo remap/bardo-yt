@@ -108,6 +108,65 @@ class FileStore:
         return sorted(key for key in keys if key.startswith(prefix))
 
 
+class MemoStore:
+    """A Store that answers immutable derived values from memory.
+
+    `select_videos` runs on every `/api/videos` request, cached search or not,
+    and it reads one small object per video for the motion score and one for the
+    country of origin -- around 80 gets for a 4x2 wall with the default scan
+    depth. Against a FileStore that is free; against R2 each one is an HTTPS
+    round trip, so a plain reload was paying tens of them to re-read values that
+    cannot have changed. A video does not change origin, its storyboard frames
+    do not change, and neither does the letterbox of its thumbnail.
+
+    Memoised prefixes are therefore immutable-by-construction. Three things are
+    deliberately NOT memoised:
+
+    - `search/` -- entries expire, and `cache.read` needs to see that.
+    - `config.yaml` -- edited at runtime; a stale copy would serve the wrong
+      wall to everyone until the container slept.
+    - `_budget.json` -- many writers by design. Reading a memoised copy would
+      defeat the compare-and-swap and let the ledger drift.
+
+    Writes always reach the wrapped store, and update the memo, so a value read
+    back in the same process matches what was persisted.
+    """
+
+    #: Immutable per video id. Keyed by video, never by query or by user.
+    MEMO_PREFIXES = ("motion/", "origin/", "contentbox/")
+
+    def __init__(self, inner: Store) -> None:
+        self._inner = inner
+        self._memo: dict[str, bytes] = {}
+
+    def _memoisable(self, key: str) -> bool:
+        return key.startswith(self.MEMO_PREFIXES)
+
+    async def get(self, key: str) -> bytes | None:
+        if self._memoisable(key) and key in self._memo:
+            return self._memo[key]
+        value = await self._inner.get(key)
+        if value is not None and self._memoisable(key):
+            self._memo[key] = value
+        return value
+
+    async def put(self, key: str, data: bytes) -> None:
+        await self._inner.put(key, data)
+        if self._memoisable(key):
+            self._memo[key] = data
+
+    async def get_with_version(self, key: str) -> tuple[bytes, str] | None:
+        # Never memoised: the version is the whole point of asking, and the only
+        # caller is the budget ledger's compare-and-swap.
+        return await self._inner.get_with_version(key)
+
+    async def put_if_version(self, key: str, data: bytes, version: str | None) -> bool:
+        return await self._inner.put_if_version(key, data, version)
+
+    async def list_keys(self, prefix: str) -> list[str]:
+        return await self._inner.list_keys(prefix)
+
+
 def r2_client(
     account_id: str,
     access_key_id: str,

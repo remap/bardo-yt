@@ -56,6 +56,23 @@ let prerolled = false;
 // players belonging to the set that replaced it.
 let generation = 0;
 
+// Which video set is allowed to land. Two paths can be in flight at once --
+// requestNewQuery() waiting on Gemini, and resync() waiting on /api/videos --
+// and either can take seconds. Without this, whichever ANSWERS last won, not
+// whichever was ASKED for last, so a WebSocket reconnect mid-generation would
+// snap the wall back to the previous query.
+//
+// It also protected nothing on the way out: resync ends by clearing a stored
+// query that no longer matches what the server served, so a late resync landing
+// after a new query had been saved would erase it. That is what made the wall
+// look like it was picking queries at random.
+//
+// Separate from `generation` above deliberately: that one guards players
+// mid-preroll (gotcha 18), this one guards which response may touch the wall
+// at all. Same idea, different lifetimes -- a single counter would make a
+// preroll cancel a legitimate resync.
+let applySeq = 0;
+
 const PREROLL_TIMEOUT_MS = 25000;
 const PREROLL_POLL_MS = 250;
 // pauseVideo() is not synchronous, and a seek can knock a player back into
@@ -132,7 +149,7 @@ function setAudibleCell(index) {
 }
 
 function refreshMuteButton() {
-  muteButton.textContent = muted ? "Unmute all" : "Mute all";
+  muteButton.textContent = muted ? "Unmute" : "Mute";
   muteButton.dataset.muted = String(muted);
 }
 
@@ -554,6 +571,13 @@ function applyInPlace() {
 }
 
 function applyVideos(message) {
+  // Logged in full, on purpose. The query that reaches YouTube is not the text
+  // typed into the box -- an empty box generates from the theme, and a steer is
+  // a metaprompt -- so when the wall shows something unexpected, this is the
+  // only place that says what was actually searched. `timings` says where the
+  // time went: `origin` at or near 15.00 means its httpx timeout expired, which
+  // is swallowed by design and silently changes which videos get chosen.
+  console.log("[wall] query=%o from_cache=%o timings=%o", message.query, message.from_cache, message.timings ?? {});
   for (const [videoId, title] of Object.entries(message.titles ?? {})) {
     titles.set(videoId, title);
   }
@@ -588,6 +612,7 @@ let seededMuteFromConfig = false;
 let seededFollowFromConfig = false;
 
 async function requestNewQuery(prompt = null) {
+  const seq = ++applySeq;
   newQueryButton.disabled = true;
   setStatus(prompt ? `inventing a query from “${prompt}”…` : "inventing a query…", "busy");
   try {
@@ -602,11 +627,15 @@ async function requestNewQuery(prompt = null) {
     });
     if (response.ok) {
       const message = await response.json();
+      // History first, and unconditionally: those 100 units were spent and
+      // Gemini said this, so the avoid-list should know even if the result is
+      // no longer wanted on screen.
+      pushHistory(message.query);
+      if (seq !== applySeq) return true;
       // Remember it before applying: a reload must land on the same wall, and
       // replaying a stored query costs nothing (the server serves it from
       // cache or falls back -- it never re-searches).
       saveQuery(message.query);
-      pushHistory(message.query);
       applyVideos(message);
       return true;
     }
@@ -647,6 +676,11 @@ async function resync() {
     if (await requestNewQuery()) return;
   }
 
+  // Taken here, not at the top of resync: the ?new=true branch above may have
+  // run requestNewQuery, which takes a sequence of its own. Claiming ours after
+  // that keeps a failed generation from leaving this resync permanently stale
+  // and the wall unrendered.
+  const seq = ++applySeq;
   const stored = loadQuery();
   const videosResponse = await fetch(
     stored ? `/api/videos?query=${encodeURIComponent(stored)}` : "/api/videos",
@@ -671,25 +705,30 @@ async function resync() {
   // the shared cache and is gone. Clearing lets this browser fall back to the
   // shared query cleanly. Storing the fallback instead would pin it as a
   // client query forever, which is the same bug wearing a different hat.
+  // Superseded while we were waiting -- a New query started after this resync
+  // did. Returning here is what stops the clearQuery() below from erasing the
+  // query that generation just saved.
+  if (seq !== applySeq) return;
   if (stored && message.query !== stored) clearQuery();
   applyVideos(message);
 }
 
-newQueryButton.addEventListener("click", () => requestNewQuery());
-
-// The prompt box is a metaprompt, not a raw search: what you type goes to
-// Gemini together with the app's standing guidance, so "sadder, more piano"
-// comes back as a query that actually returns a wall's worth of moving video.
-promptInput.addEventListener("keydown", async (event) => {
-  if (event.key !== "Enter") return;
+// The one way to spend 100 units. Deliberately a click and nothing else: no
+// Enter handler on the box, so a stray keystroke in a focused field cannot
+// launch a search. It reads whatever is in the prompt, and an empty box means
+// "generate from the standing theme alone" -- which the server records as
+// `generated` rather than `manual`.
+//
+// The box is a metaprompt, not a raw search: what you type goes to Gemini
+// together with the app's standing guidance, so "sadder, more piano" comes
+// back as a query that actually returns a wall's worth of moving video.
+newQueryButton.addEventListener("click", async () => {
   const prompt = promptInput.value.trim();
-  if (!prompt) return;
   promptInput.disabled = true;
   try {
-    await requestNewQuery(prompt);
+    await requestNewQuery(prompt || null);
   } finally {
     promptInput.disabled = false;
-    promptInput.focus();
   }
 });
 

@@ -212,3 +212,25 @@ async def test_html_entities_in_titles_are_decoded():
         items = await youtube.search({"q": "x"}, "KEY", client=client)
     assert items[0]["title"] == "Rumi & Jinu 'Golden' (KPOP) \"Cover\""
     assert items[0]["channel"] == "kameko & Rica"
+
+
+def test_region_code_is_omitted_when_unknown():
+    """No header, no regionCode -- which is right locally, where the API infers
+    the operator's own country from the caller."""
+    params = youtube.build_params("q", "relevance", "any", "moderate", "en")
+    assert "regionCode" not in params
+
+
+def test_region_code_is_pinned_when_known():
+    params = youtube.build_params("q", "relevance", "any", "moderate", "en", "any", "US")
+    assert params["regionCode"] == "US"
+
+
+def test_region_code_changes_the_cache_key():
+    """Two regions can legitimately rank the same query differently, so they
+    must not share one cache entry."""
+    from ytmatrix import cache
+
+    us = youtube.build_params("q", "relevance", "any", "moderate", "en", "any", "US")
+    jp = youtube.build_params("q", "relevance", "any", "moderate", "en", "any", "JP")
+    assert cache.cache_key(us) != cache.cache_key(jp)
