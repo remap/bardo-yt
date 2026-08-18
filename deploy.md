@@ -75,8 +75,13 @@ Capture two values:
   only because Cloudflare's own sample code does — it is an application
   audience.
 
-- **Team domain** — Zero Trust → **Settings**, like
-  `https://yourteam.cloudflareaccess.com`. **Scheme, no trailing slash.**
+- **Team domain** — Zero Trust → **Settings** → **Team name and domain**.
+  Shown bare, like `yourteam.cloudflareaccess.com`.
+
+  **Add `https://` and no trailing slash.** The Worker concatenates this into
+  the JWKS URL *and* compares it to the token's `iss` claim, so a trailing
+  slash leaves the certificate fetch working while silently breaking the
+  issuer check — every request then 401s on a perfectly valid token.
 
 > Cloudflare may refuse an application for a hostname with no DNS record yet.
 > If so, come back to this straight after step 3 — but do it **immediately**,

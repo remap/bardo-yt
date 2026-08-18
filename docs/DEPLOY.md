@@ -366,8 +366,15 @@ Then collect two values:
   *inside* an application and plays no part in token validation. The variable
   is called `ACCESS_POLICY_AUD` only because Cloudflare's own sample code
   names it `POLICY_AUD`; it holds an application audience.
-- Your **team domain**, under **Settings → Custom Pages** or the Zero Trust
-  overview. It looks like `https://yourteam.cloudflareaccess.com`.
+- Your **team domain**, under Zero Trust → **Settings** → **Team name and
+  domain**. It is shown bare, like `yourteam.cloudflareaccess.com`, and the
+  variable needs `https://` in front of it.
+
+  **No trailing slash.** `worker/index.ts` concatenates this into the JWKS URL
+  *and* passes it as the expected `iss`. A trailing slash leaves the first
+  working and silently breaks the second, so every request 401s while carrying
+  a perfectly valid token — which reads like a broken login rather than a
+  malformed config value.
 
 ### Optional: keeping `/healthz` public
 
