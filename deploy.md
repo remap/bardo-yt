@@ -65,7 +65,16 @@ Add a policy: **Allow**, Include → **Emails** → your 5–10 addresses.
 
 Capture two values:
 
-- **AUD tag** — the application's overview page.
+- **AUD tag** — Zero Trust → **Access controls** → **Applications** →
+  **Configure** on this app → **Additional settings** → **Application
+  Audience (AUD) Tag**. A 64-character hex string.
+
+  Not a **policy ID**. The AUD identifies the *application* and is what the
+  JWT's `aud` claim carries; a policy ID identifies one access rule inside it
+  and is never used here. `wrangler.jsonc` calls the var `ACCESS_POLICY_AUD`
+  only because Cloudflare's own sample code does — it is an application
+  audience.
+
 - **Team domain** — Zero Trust → **Settings**, like
   `https://yourteam.cloudflareaccess.com`. **Scheme, no trailing slash.**
 

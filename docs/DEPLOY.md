@@ -352,10 +352,20 @@ one.
 
 Then collect two values:
 
-- This application's **Application Audience (AUD) Tag** — on the application's
-  overview, a long hex string. If you end up with more than one application (see
-  below), this is the one the Worker validates against: the **yt matrix**
-  application covering the whole hostname, never any other.
+- This application's **Application Audience (AUD) Tag** — Zero Trust →
+  **Access controls** → **Applications** → **Configure** on this app →
+  **Additional settings** → **Application Audience (AUD) Tag**. A 64-character
+  hex string. If you end up with more than one application (see below), this is
+  the one the Worker validates against: the **yt matrix** application covering
+  the whole hostname, never any other.
+
+  **It is not a policy ID, and the two are easy to confuse.** The AUD
+  identifies the *application*, never changes unless you delete and recreate
+  that application, and is exactly what the JWT's `aud` claim carries — which
+  is what `worker/index.ts` checks. A policy ID identifies one access rule
+  *inside* an application and plays no part in token validation. The variable
+  is called `ACCESS_POLICY_AUD` only because Cloudflare's own sample code
+  names it `POLICY_AUD`; it holds an application audience.
 - Your **team domain**, under **Settings → Custom Pages** or the Zero Trust
   overview. It looks like `https://yourteam.cloudflareaccess.com`.
 
