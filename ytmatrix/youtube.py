@@ -32,6 +32,7 @@ def build_params(
     safe_search: str,
     relevance_language: str | None,
     video_license: str = "any",
+    region_code: str | None = None,
 ) -> dict[str, str]:
     """Build the upstream parameter set, excluding the API key.
 
@@ -58,6 +59,18 @@ def build_params(
         params["videoLicense"] = video_license
     if relevance_language:
         params["relevanceLanguage"] = relevance_language
+    # Pinned when known, because the API infers one from the CALLER's address
+    # otherwise -- so the same query ranked one way from a laptop and another
+    # from whichever datacenter a container happened to wake up in. It comes
+    # from Cloudflare's view of the browser, not from the server's own address.
+    #
+    # It is part of the cache key on purpose: two regions can legitimately get
+    # different results, and sharing one entry between them would serve one of
+    # them the other's wall. With every viewer in one country this costs
+    # nothing; with viewers in several it trades a little cache reuse for
+    # results that match where each of them actually is.
+    if region_code:
+        params["regionCode"] = region_code
     return params
 
 

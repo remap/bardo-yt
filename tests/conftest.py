@@ -15,14 +15,14 @@ def no_thumbnail_fetches(request, monkeypatch):
     if request.node.get_closest_marker("browser") or request.node.get_closest_marker("live"):
         return
 
-    async def unmeasured(video_id, cache_dir, client):
+    async def unmeasured(video_id, index, client):
         return motion.UNKNOWN_SCORE
 
     monkeypatch.setattr(server, "motion_score", unmeasured)
 
     # Country lookup is two more network calls per query. Same rule: no test
     # in the default suite touches the wire.
-    async def no_countries(video_ids, cache_dir, api_key):
+    async def no_countries(video_ids, index, api_key):
         return {}
 
     monkeypatch.setattr(server, "video_countries", no_countries)

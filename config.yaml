@@ -26,6 +26,6 @@ filtering:
   skip_static: true
   prefer_country_diversity: true
   static_threshold: 3.5
-  scan_depth: 24
+  scan_depth: 16
 quota:
   daily_limit_units: 5000

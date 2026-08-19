@@ -14,6 +14,7 @@ script and a module.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import socket
 import subprocess
@@ -27,6 +28,7 @@ import yaml
 from playwright.sync_api import sync_playwright
 
 from ytmatrix import cache, youtube
+from ytmatrix.store import FileStore
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -43,6 +45,11 @@ CONFIG = {
     },
     "playback": {"muted": True, "autoplay_on_change": True, "start_offset": 0, "loop": True},
     "cache": {"ttl_hours": 24},
+    # Enabled so the New query button is visible: player.js hides it when
+    # generation is off, and the model default is off. It only un-hides the
+    # button -- nothing here generates unless a test clicks it, and the tests
+    # that do intercept the request rather than letting it reach Gemini.
+    "query_generation": {"enabled": True},
 }
 
 
@@ -52,8 +59,28 @@ def _find_free_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.fixture(scope="session")
+def _fresh_dist():
+    """Rebuild dist/ before any browser test runs.
+
+    The server serves dist/, not static/ -- the Worker's asset binding wants an
+    assembled bundle, and main.py mirrors that locally. dist/ is a copy, so
+    editing static/player.js changes nothing the browser sees until something
+    rebuilds it, and this suite would go on passing against the previous copy.
+    That is precisely the failure gotcha 14 exists to catch, so the suite
+    rebuilds rather than trusting whatever a previous command happened to leave
+    behind. The script is a handful of `cp`s -- once per session costs nothing.
+    """
+    subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "build-dist.sh")],
+        cwd=str(REPO_ROOT),
+        check=True,
+        capture_output=True,
+    )
+
+
 @pytest.fixture
-def running_server(tmp_path):
+def running_server(tmp_path, _fresh_dist):
     """A real server over TLS, backed by a seeded cache so no quota is spent."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(CONFIG))
@@ -76,7 +103,17 @@ def running_server(tmp_path):
         "uSAPVDS2LUo",
     ]
     ids = [base[i % len(base)] for i in range(50)]
-    cache.write(cache_dir, params, [{"video_id": v, "title": v, "channel": "c"} for v in ids])
+    # cache.write is async and goes through a Store, not a directory -- the
+    # container has no durable disk. asyncio.run because this fixture is sync:
+    # calling it without awaiting builds a coroutine, seeds nothing, and every
+    # test in this file then sits waiting on a live search that never comes.
+    asyncio.run(
+        cache.write(
+            FileStore(cache_dir),
+            params,
+            [{"video_id": v, "title": v, "channel": "c"} for v in ids],
+        )
+    )
 
     port = _find_free_port()
     env = {
@@ -246,18 +283,18 @@ def test_the_wall_starts_muted_and_the_button_unmutes_every_player(running_serve
             "window.__players?.every(p => typeof p?.isMuted === 'function')", timeout=25_000
         )
 
-        assert page.locator("#mute").text_content().strip() == "Unmute all"
+        assert page.locator("#mute").text_content().strip() == "Unmute"
         assert page.evaluate("window.__players.every(p => p.isMuted())"), "should start muted"
 
         page.wait_for_function("window.__prerolled === true", timeout=40_000)
         page.click("#play")
         page.click("#mute")
         page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=15_000)
-        assert page.locator("#mute").text_content().strip() == "Mute all"
+        assert page.locator("#mute").text_content().strip() == "Mute"
 
         page.click("#mute")
         page.wait_for_function("window.__players.every(p => p.isMuted())", timeout=15_000)
-        assert page.locator("#mute").text_content().strip() == "Unmute all"
+        assert page.locator("#mute").text_content().strip() == "Unmute"
         browser.close()
 
 
@@ -457,7 +494,8 @@ def test_right_click_on_an_empty_cell_does_nothing(running_server):
         browser.close()
 
 
-def test_the_prompt_box_sends_a_metaprompt_on_enter(running_server):
+def test_the_new_query_button_carries_the_prompt(running_server):
+    """The button is the only trigger, and it sends whatever is in the box."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_context(ignore_https_errors=True).new_page()
@@ -473,17 +511,48 @@ def test_the_prompt_box_sends_a_metaprompt_on_enter(running_server):
             )[-1],
         )
         page.fill("#prompt", "sadder, more piano")
-        page.press("#prompt", "Enter")
-        page.wait_for_function("Object.keys(window).length >= 0", timeout=2_000)
+        page.click("#new-query")
         page.wait_for_timeout(1200)
 
-        assert sent, "Enter did not trigger a request"
+        assert sent, "the button did not trigger a request"
         assert '"prompt"' in sent["body"]
         assert "sadder, more piano" in sent["body"]
         browser.close()
 
 
-def test_an_empty_prompt_does_not_spend_quota(running_server):
+def test_enter_in_the_prompt_box_presses_the_query_button(running_server):
+    """Enter is how you finish typing in a text box, so it sends what you
+    typed -- exactly as if the button had been clicked, steer and all.
+
+    It is literally a .click() rather than a second call into
+    requestNewQuery: the button owns the disabled state, the empty-box
+    meaning and the 100-unit spend, and a parallel path would eventually
+    disagree with it about one of them.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        sent = {}
+        page.route(
+            "**/api/new-query",
+            lambda route: (sent.update(body=route.request.post_data or ""), route.abort())[-1],
+        )
+        page.fill("#prompt", "sadder, more piano")
+        page.press("#prompt", "Enter")
+        page.wait_for_timeout(1200)
+
+        assert sent, "Enter did not trigger a request"
+        assert "sadder, more piano" in sent["body"], "the steer must survive the keystroke"
+        browser.close()
+
+
+def test_enter_while_a_generation_is_running_does_not_start_a_second(running_server):
+    """The button disables itself for the duration of a search. Enter goes
+    through that same button, so it inherits the guard -- otherwise holding
+    the key down would spend 100 units per repeat."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_context(ignore_https_errors=True).new_page()
@@ -491,12 +560,43 @@ def test_an_empty_prompt_does_not_spend_quota(running_server):
         page.wait_for_selector(".cell iframe", timeout=20_000)
 
         calls = []
-        page.route("**/api/new-query", lambda route: (calls.append(1), route.abort())[-1])
-        page.fill("#prompt", "   ")
+        # Never answer, so the first generation stays in flight.
+        page.route("**/api/new-query", lambda route: calls.append(1))
+        page.fill("#prompt", "sadder, more piano")
         page.press("#prompt", "Enter")
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(600)
+        page.press("#prompt", "Enter")
+        page.press("#prompt", "Enter")
+        page.wait_for_timeout(600)
 
-        assert calls == [], "whitespace should never trigger a 100-unit generation"
+        assert len(calls) == 1, f"one generation, not {len(calls)}"
+        browser.close()
+
+
+def test_an_empty_box_generates_from_the_theme_alone(running_server):
+    """An empty box is not an error -- it means "no steer", and the server
+    records that as `generated` rather than `manual`. Whitespace is normalised
+    away rather than sent as a prompt of spaces."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        sent = {}
+        page.route(
+            "**/api/new-query",
+            lambda route: (
+                sent.update({"body": route.request.post_data}),
+                route.fulfill(status=409, json={"detail": "stubbed"}),
+            )[-1],
+        )
+        page.fill("#prompt", "   ")
+        page.click("#new-query")
+        page.wait_for_timeout(1200)
+
+        assert sent, "an empty box should still generate from the theme"
+        assert '"prompt"' not in sent["body"], "whitespace must not travel as a prompt"
         browser.close()
 
 
@@ -1108,4 +1208,178 @@ def test_rewind_does_not_start_a_paused_wall(running_server):
         advanced = [(i, a, b) for i, (a, b) in enumerate(zip(first, second)) if b - a > 0.5]
         assert advanced == [], f"rewind restarted a paused wall: {advanced}"
         assert all(t < 3 for t in second), f"not rewound: {second}"
+        browser.close()
+
+
+def test_a_browser_that_has_not_pressed_new_query_stores_nothing(running_server):
+    """Only what /api/new-query returns is stored -- never what /api/videos served.
+
+    This is the rule the whole per-browser design turns on, and it is invisible
+    to every other test in this file: they all start from a fresh context with
+    empty localStorage and a cached config query, so a regression that stored
+    `message.query` would leave all of their assertions passing.
+
+    What it would break instead is quiet and slow. The shared config query would
+    land in localStorage on first load and thereafter be supplied as a *client*
+    query -- which the server serves cache-only and never re-searches. So
+    cache.ttl_hours would go inert, the wall would stop refreshing on its own,
+    and `source: "client"` in the query log would cease to distinguish anything.
+    Nobody would notice for months. Hence an explicit assertion.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        # A cell holding an iframe means the videos response has already been
+        # applied -- so whatever was going to be written, has been written.
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        assert page.evaluate("localStorage.getItem('ytmatrix.query')") is None
+        browser.close()
+
+
+def test_a_stored_query_the_shared_cache_no_longer_holds_is_cleared(running_server):
+    """The other half of the rule: the one write on the /api/videos path is a deletion.
+
+    A stored query is honoured only while the shared cache still holds it. Once
+    it ages out the server silently answers with the config query instead, and
+    this browser has to drop its own so it falls back cleanly. Storing the
+    fallback instead would pin it as a client query forever -- the same bug
+    wearing a different hat.
+
+    Costs no quota: an unhonoured client query falls back to the config query,
+    which this fixture has seeded, so the server searches nothing.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        # Stand in for a query that has aged out of the shared cache. Set after
+        # the first load rather than via an init script, which would put it back
+        # on the reload and prove nothing.
+        #
+        # The remembered wall is dropped alongside it, because a restored wall
+        # short-circuits the request entirely -- there is nothing to detect if
+        # the browser never asks. That is the point of restoring, and it just
+        # moves this clean-up to the first resync that does contact the server
+        # (a reconnect, or a search-affecting config change).
+        page.evaluate("localStorage.setItem('ytmatrix.query', 'a query no cache ever held')")
+        page.evaluate("localStorage.removeItem('ytmatrix.wall')")
+        page.reload(wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        assert page.evaluate("localStorage.getItem('ytmatrix.query')") is None
+        # And it fell back to the shared query rather than to an empty wall.
+        assert "golden cover" in page.evaluate("document.getElementById('status').textContent")
+        assert page.locator('.cell[data-empty="true"]').count() == 0
+        browser.close()
+
+
+def test_a_reload_restores_the_wall_without_asking_the_server(running_server):
+    """The videos, not just the query that found them.
+
+    Replaying a query made the server resolve it again on every load: a cache
+    hit for the search, but select_videos still ran, which on the deployment is
+    seconds of motion scoring for a set the browser had already been shown. It
+    was not deterministic either -- reserves get consumed and scoring widens in
+    waves -- so a reload could legitimately come back with a different eight
+    videos than the ones on screen a moment earlier, which is what made
+    reloading feel like it broke the wall.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        before = page.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId ?? '')"
+        )
+        assert any(before), "the first load put something on the wall"
+
+        # Anything asked for on the reload would show up here.
+        requested = []
+        page.route(
+            "**/api/videos*",
+            lambda route: (requested.append(route.request.url), route.continue_())[-1],
+        )
+        page.reload(wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        after = page.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId ?? '')"
+        )
+        assert after == before, "a reload must restore exactly the wall that was there"
+        assert requested == [], "a restored wall must cost no request at all"
+        browser.close()
+
+
+def test_a_container_still_waking_is_waited_out_not_crashed_on(running_server):
+    """The first request to a sleeping or newly deployed container fails, and it
+    fails in prose rather than JSON.
+
+    @cloudflare/containers answers a cold start with a 500 whose body is
+    "Failed to start container: ..." while it boots, or a 503 saying an instance
+    is still being provisioned -- its own message warns that can take minutes.
+    Neither is an error in this app. Parsing either as JSON threw, left `config`
+    null with nothing retrying, and hung the wall on a blank page; pressing
+    Query: then spent 100 units and threw again on cellCount(config.grid).
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+
+        # Fail the config fetch exactly the way a waking container does, then
+        # let it through -- which is what happens once the port comes up.
+        attempts = []
+
+        def flaky_config(route):
+            attempts.append(1)
+            if len(attempts) <= 2:
+                route.fulfill(
+                    status=500,
+                    content_type="text/plain",
+                    body="Failed to start container: container is not running",
+                )
+            else:
+                route.continue_()
+
+        page.route("**/api/config", flaky_config)
+        page.goto(running_server, wait_until="load")
+
+        # The wall still starts, having waited the container out.
+        page.wait_for_selector(".cell iframe", timeout=30_000)
+        assert len(attempts) >= 3, "the config fetch should have been retried"
+        assert page.locator('.cell[data-empty="true"]').count() == 0
+        browser.close()
+
+
+def test_new_query_refuses_before_a_config_has_loaded(running_server):
+    """The button is reachable before the first resync finishes. Generating
+    without a config spends 100 units and then throws in applyVideos, which is
+    the worst of both -- so it declines and says so."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+
+        # Never let a config through, so `config` stays null.
+        page.route(
+            "**/api/config",
+            lambda route: route.fulfill(
+                status=500, content_type="text/plain", body="Failed to start container"
+            ),
+        )
+        spent = []
+        page.route(
+            "**/api/new-query",
+            lambda route: (spent.append(1), route.abort())[-1],
+        )
+        page.goto(running_server, wait_until="load")
+        page.wait_for_timeout(1500)
+        page.click("#new-query", force=True)
+        page.wait_for_timeout(800)
+
+        assert spent == [], "a generation without a config must not spend quota"
         browser.close()

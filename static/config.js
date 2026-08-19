@@ -64,10 +64,25 @@ async function refreshQuota() {
       quotaEl.dataset.cost = "100";
       return;
     }
-    const { would_hit: hit, quota_cost: cost } = await response.json();
+    const {
+      would_hit: hit,
+      quota_cost: cost,
+      units_spent_today: spent,
+      daily_limit_units: limit,
+    } = await response.json();
+    // The numbers come from the server rather than being written in here. The
+    // ceiling that actually stops a save is `quota.daily_limit_units` from the
+    // shared config, which is not Google's 10,000 and can be edited on this
+    // very page; naming the wrong one is worse than naming none.
+    //
+    // "once, however many walls are open" is a claim about `resolve_videos`'s
+    // single-flight: a search-affecting save makes every connected browser
+    // refetch at once, and without that guard the true cost would be this
+    // number times the number of open walls (CLAUDE.md gotcha 29).
     quotaEl.textContent = hit
       ? "cached — saving costs 0 quota units"
-      : "not cached — saving spends 100 of 10,000 daily quota units";
+      : `not cached — saving spends ${cost} units once, however many walls are ` +
+        `open (${spent} of ${limit} used today)`;
     quotaEl.dataset.cost = String(cost);
   } catch {
     quotaEl.textContent = "could not reach the server";

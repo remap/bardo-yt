@@ -281,3 +281,27 @@ export function classifyConfigChange(previous, next) {
   if (IN_PLACE_KEYS.some((key) => differs(previous, next, key))) return "in-place";
   return "none";
 }
+
+// Mirrors what the server used to decide for everyone -- gaps included, not
+// just the parts that were right. `filtering.*` did not provoke a refetch
+// there and does not here, so changing it takes effect on the next resync
+// rather than immediately. This is parity, deliberately; it is not a claim
+// that the set of keys below is complete.
+//
+// The server cannot make this call any more -- it does not know what query any
+// given browser is watching -- so each client works it out from the config
+// broadcast itself.
+const SEARCH_KEYS = ["query", "search"];
+
+export function needsRefetch(previous, next) {
+  if (!previous) return true;
+  if (SEARCH_KEYS.some((key) => differs(previous, next, key))) return true;
+  return cellCount(previous.grid) !== cellCount(next.grid);
+}
+
+// Typing a query by hand on the config page is an override: it must beat
+// whatever Gemini last handed this browser, or the config page would appear
+// to do nothing for anyone who had ever pressed New query.
+export function overridesStoredQuery(previous, next) {
+  return Boolean(previous) && differs(previous, next, "query");
+}

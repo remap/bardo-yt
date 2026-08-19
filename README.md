@@ -11,6 +11,11 @@ and cannot do before committing to a wall design.
 Design rationale: `docs/superpowers/specs/2026-08-10-yt-matrix-design.md`.
 Task-by-task build: `docs/superpowers/plans/2026-08-10-yt-matrix.md`.
 
+**Deploying it to a URL a handful of people can sign in to: `docs/DEPLOY.md`.**
+The rest of this README describes running it locally, which is unchanged. Where
+it says state lives under `cache/`, that is the local `FileStore`; deployed, the
+same keys live in an R2 bucket.
+
 ## Quick start
 
 ```bash
@@ -79,8 +84,11 @@ by construction and costs 100 units. It takes an explicit act:
 - loading `/?new=true` (the parameter is stripped from the URL immediately, so
   a stray refresh or a restored tab can't spend another 100 units)
 
-Everything else is free. The current query is persisted to `cache/_wall.json`,
-so a plain reload — or a server restart — restores the same wall at zero cost.
+Everything else is free. The current query is persisted in the browser's own
+`localStorage`, so a plain reload — or a server restart — restores the same wall
+at zero cost. It lives there rather than on the server because config is shared
+between everyone and walls are not: a replayed query is served from the shared
+cache, and is never allowed to trigger a search.
 
 **Shuffle** draws a fresh eight from the same query. A search returns 50 videos
 for eight cells, so there is a lot of unseen material behind the wall and

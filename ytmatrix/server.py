@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
 
 from ytmatrix import (
@@ -18,21 +20,24 @@ from ytmatrix import (
     motion,
     origin,
     querylog,
-    wallstate,
     youtube,
 )
-from ytmatrix.config import Config, load_config, merge_config, save_config
+from ytmatrix.config import DEFAULT_CONFIG_PATH, Config, load_config, merge_config, save_config
+from ytmatrix.derived import DerivedIndex
 from ytmatrix.settings import Settings
+from ytmatrix.store import MemoStore, Store
 from ytmatrix.ws import ConnectionManager
 
-STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+logger = logging.getLogger(__name__)
 
 
 class BudgetExceededError(RuntimeError):
     """The self-imposed daily ceiling would be crossed by another search."""
 
 
-def search_params_for(config: Config, query: str | None = None) -> dict[str, str]:
+def search_params_for(
+    config: Config, query: str | None = None, region_code: str | None = None
+) -> dict[str, str]:
     return youtube.build_params(
         query or config.query,
         config.search.order.value,
@@ -40,97 +45,176 @@ def search_params_for(config: Config, query: str | None = None) -> dict[str, str
         config.search.safe_search.value,
         config.search.relevance_language,
         config.search.video_license.value,
+        region_code,
     )
 
 
 async def resolve_videos(
-    config: Config, cache_dir: Path, api_key: str, query: str | None = None
+    config: Config,
+    store: Store,
+    api_key: str,
+    query: str | None = None,
+    *,
+    global_limit_units: int = budget.DAILY_QUOTA_UNITS,
+    inflight: dict[str, asyncio.Lock] | None = None,
+    region_code: str | None = None,
 ) -> dict:
-    """Return the video list for this config, spending quota only when required."""
-    params = search_params_for(config, query)
+    """Return the video list for this config, spending quota only when required.
 
-    items = cache.read(cache_dir, params, config.cache.ttl_hours)
+    `inflight` is the single-flight guard, one lock per cache key, owned by
+    `create_app`. Saving a search-affecting config change tells every connected
+    browser to resync at once, and they all miss the same new cache key in the
+    same instant -- without this, ten open walls turn one toggle of
+    `search.order` into ten searches, 1000 of the day's 10,000 units. Waiters
+    do not search: they take the lock, re-read the cache, and find what the
+    winner wrote.
+
+    An in-process lock is enough *because there is exactly one container for
+    the whole installation* (CLAUDE.md gotcha 30). The corollary is the thing
+    worth writing down: move to per-user containers and this guard silently
+    stops covering anything, because each instance would have its own dict. A
+    shared guard would then have to be a claim written to R2.
+
+    Omitting `inflight` skips the guard entirely, which is what a lone caller
+    -- a test, or a script -- wants.
+    """
+    params = search_params_for(config, query, region_code)
+
+    items = await cache.read(store, params, config.cache.ttl_hours)
     if items is not None:
         return {"items": items, "from_cache": True, "note": None}
 
+    if inflight is None:
+        return await _search_and_cache(config, store, api_key, params, global_limit_units)
+
+    key = cache.cache_key(params)
+    # No await between the read and the insert, so this cannot race.
+    lock = inflight.get(key)
+    if lock is None:
+        lock = inflight[key] = asyncio.Lock()
+    try:
+        async with lock:
+            # The winner wrote the cache before releasing, so this is a hit for
+            # everyone who queued behind it. A miss here means the winner
+            # failed or was refused, and searching again is then correct.
+            items = await cache.read(store, params, config.cache.ttl_hours)
+            if items is not None:
+                return {"items": items, "from_cache": True, "note": None}
+            return await _search_and_cache(config, store, api_key, params, global_limit_units)
+    finally:
+        # Dropped as soon as nobody holds it, so the dict does not accumulate a
+        # lock per query the process ever missed. A waiter that has been woken
+        # but has not yet resumed makes `locked()` briefly false and can lose
+        # its entry to this line -- harmless: it still holds its own reference
+        # to the lock, and anyone arriving after the write hits the cache
+        # before reaching this code at all.
+        if not lock.locked() and inflight.get(key) is lock:
+            del inflight[key]
+
+
+async def _search_and_cache(
+    config: Config,
+    store: Store,
+    api_key: str,
+    params: dict[str, str],
+    global_limit_units: int,
+) -> dict:
+    """The spending half of `resolve_videos`, past the cache miss."""
     # Checked before the call, not after: the point is to not spend the unit.
-    if budget.would_exceed(cache_dir, config.quota.daily_limit_units):
-        stale = cache.read(cache_dir, params, config.cache.ttl_hours, allow_stale=True)
+    # Two ceilings: the shared config's, which any user can lower, and the
+    # project-wide one, which none of them can raise.
+    if await budget.would_exceed(
+        store, config.quota.daily_limit_units, global_limit_units=global_limit_units
+    ):
+        stale = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
         if stale is not None:
             return {"items": stale, "from_cache": True, "note": "budget_exceeded_stale"}
         raise BudgetExceededError(
             f"daily search budget of {config.quota.daily_limit_units} units is spent "
-            f"({budget.spent(cache_dir)} used). Raise quota.daily_limit_units to continue."
+            f"({await budget.spent(store)} used). Raise quota.daily_limit_units to continue."
         )
 
+    search_started = time.monotonic()
     try:
         items = await youtube.search(params, api_key)
     except youtube.QuotaExceededError:
         # Expired-but-present beats blank: keep the wall showing something.
-        stale = cache.read(cache_dir, params, config.cache.ttl_hours, allow_stale=True)
+        stale = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
         if stale is None:
             raise
         return {"items": stale, "from_cache": True, "note": "quota_exceeded_stale"}
 
-    budget.record_search(cache_dir)
-    cache.write(cache_dir, params, items)
-    return {"items": items, "from_cache": False, "note": None}
+    search_secs = time.monotonic() - search_started
+    logger.info("search %.2fs -> %d items", search_secs, len(items))
+    await budget.record_search(store)
+    await cache.write(store, params, items)
+    return {
+        "items": items,
+        "from_cache": False,
+        "note": None,
+        "search_secs": round(search_secs, 2),
+    }
 
 
-async def motion_score(video_id: str, cache_dir: Path, client: httpx.AsyncClient) -> float:
-    """Storyboard-frame motion score for one video, cached forever on disk.
+async def motion_score(video_id: str, index: DerivedIndex, client: httpx.AsyncClient) -> float:
+    """Storyboard-frame motion score for one video, remembered forever.
 
     A video's shape never changes, and these thumbnails are not the Data API,
     so this costs no quota -- only three small image fetches, once per video.
-    """
-    store = cache_dir / "motion"
-    entry = store / f"{video_id}.json"
-    if entry.exists():
-        try:
-            return float(json.loads(entry.read_text())["score"])
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError, OSError):
-            pass  # Re-measure rather than fail.
 
-    async def frame(index: int) -> bytes | None:
+    The score lives in a shared in-memory index (see ytmatrix/derived.py) that
+    is loaded with one get and flushed behind the response, rather than in one
+    store object per video.
+    """
+    # `in`, not a None check. A stored null means "measured, and unmeasurable" --
+    # which counts as MOVING (gotcha 16), because dropping a legitimate result is
+    # worse than showing one still. Testing for None would read that as never
+    # measured and re-fetch three frames on every single request.
+    if video_id in index.entries:
+        cached = index.get(video_id)
+        if cached is None:
+            return motion.UNKNOWN_SCORE
         try:
-            response = await client.get(
-                motion.STORYBOARD_URL.format(video_id=video_id, index=index)
-            )
+            return float(cached)
+        except (TypeError, ValueError):
+            pass  # Re-measure rather than fail -- a corrupt entry is a miss.
+
+    async def frame(idx: int) -> bytes | None:
+        try:
+            response = await client.get(motion.STORYBOARD_URL.format(video_id=video_id, index=idx))
         except httpx.HTTPError:
             return None
         return response.content if response.status_code == 200 else None
 
     fetched = await asyncio.gather(*(frame(i) for i in motion.STORYBOARD_INDICES))
     score = motion.score_frames([f for f in fetched if f])
-
-    store.mkdir(parents=True, exist_ok=True)
-    tmp = entry.with_name(entry.name + ".tmp")
-    tmp.write_text(json.dumps({"score": score if score != motion.UNKNOWN_SCORE else None}))
-    tmp.replace(entry)
+    # UNKNOWN_SCORE is stored as null: an unmeasurable video counts as moving
+    # (gotcha 16), and that decision belongs to the reader, not the store.
+    index.set(video_id, None if score == motion.UNKNOWN_SCORE else score)
     return score
 
 
-async def video_countries(video_ids: list[str], cache_dir: Path, api_key: str) -> dict[str, str]:
+async def video_countries(
+    video_ids: list[str], index: DerivedIndex, api_key: str
+) -> dict[str, str]:
     """video id -> ISO country, for the ids we can resolve.
 
     Two batched calls at 1 unit each, versus 100 for the search itself.
-    Results are cached per video forever -- a video does not change origin.
+    Countries are remembered forever -- a video does not change origin -- in the
+    shared in-memory index rather than one store object per video, which is what
+    turned 50 gets and 50 puts into one of each behind the response.
+
     Any failure returns what it has: diversity is a preference, not a
     requirement, and must never stop the wall from resolving.
     """
-    store = cache_dir / "origin"
     known: dict[str, str] = {}
     missing: list[str] = []
     for video_id in video_ids:
-        entry = store / f"{video_id}.json"
-        if entry.exists():
-            try:
-                country = json.loads(entry.read_text()).get("country")
-                if country:
-                    known[video_id] = country
-                continue
-            except (json.JSONDecodeError, OSError):
-                pass
+        if video_id in index.entries:
+            country = index.get(video_id)
+            if country:
+                known[video_id] = country
+            continue
         missing.append(video_id)
 
     if not missing:
@@ -167,42 +251,112 @@ async def video_countries(video_ids: list[str], cache_dir: Path, api_key: str) -
     except httpx.HTTPError:
         return known
 
-    store.mkdir(parents=True, exist_ok=True)
     for video_id, country in resolved.items():
-        entry = store / f"{video_id}.json"
-        tmp = entry.with_name(entry.name + ".tmp")
-        tmp.write_text(json.dumps({"country": country}))
-        tmp.replace(entry)
+        index.set(video_id, country)
         if country:
             known[video_id] = country
     return known
 
 
 async def select_videos(
-    config: Config, video_ids: list[str], cache_dir: Path, api_key: str = ""
+    config: Config,
+    video_ids: list[str],
+    motion_index: DerivedIndex,
+    origin_index: DerivedIndex,
+    api_key: str = "",
 ) -> dict:
     """Order the results so the wall shows things that move, from many places."""
     if not video_ids:
-        return {"slots": [], "reserves": [], "relaxed": 0}
+        return {"slots": [], "reserves": [], "relaxed": 0, "timings": {}}
 
     # Diversity first, motion second: motion.rank preserves the order it is
     # given among the videos it keeps, so spreading countries here survives
     # the static filter rather than being undone by it.
+    origin_secs = 0.0
+    resolved_countries = 0
     if config.filtering.prefer_country_diversity and api_key:
-        countries = await video_countries(video_ids, cache_dir, api_key)
+        started = time.monotonic()
+        countries = await video_countries(video_ids, origin_index, api_key)
+        origin_secs = time.monotonic() - started
+        resolved_countries = len(countries)
         video_ids = origin.diversify([(v, countries.get(v)) for v in video_ids])
 
     if not config.filtering.skip_static:
         cells = config.grid.cells
-        return {"slots": video_ids[:cells], "reserves": video_ids[cells:], "relaxed": 0}
+        return {
+            "slots": video_ids[:cells],
+            "reserves": video_ids[cells:],
+            "relaxed": 0,
+            "timings": {"origin": round(origin_secs, 2), "countries": resolved_countries},
+        }
 
-    # Measure only as deep as needed: the grid plus enough spares to substitute
-    # from. Scoring all 50 would mean 150 fetches for a wall of eight.
-    depth = min(len(video_ids), config.grid.cells + config.filtering.scan_depth)
-    head, tail = video_ids[:depth], video_ids[depth:]
+    # Measured in waves, widening only when the wall cannot be filled.
+    #
+    # Three frames per video, so scoring the grid plus the full scan depth was
+    # ~96 image fetches for a wall of eight -- 3.3s on Cloudflare against 0.22s
+    # on a laptop. Most queries are mostly-moving, so the first wave usually
+    # yields enough and the rest is never fetched. A query full of stills widens
+    # to exactly the old depth and costs exactly what it used to.
+    #
+    # This does not weaken the reserve pool's contract, because the pool never
+    # promised to be vetted: everything past `scan_depth` was already appended
+    # unmeasured (`tail` below). Waves only move the boundary between "measured"
+    # and "unmeasured" reserves, and gotcha 4's substitution works either way --
+    # a reserve that turns out to be a still is replaced on its own onError.
+    cells = config.grid.cells
+    depth = min(len(video_ids), cells + config.filtering.scan_depth)
+    scored: list[tuple[str, float]] = []
+    measured = 0
 
+    motion_started = time.monotonic()
     async with httpx.AsyncClient(timeout=10.0) as client:
-        scores = await asyncio.gather(*(motion_score(v, cache_dir, client) for v in head))
+        while measured < depth:
+            # First wave is the grid itself; later waves add half a grid at a
+            # time, so a mostly-static query converges without many round trips.
+            wave_size = cells if measured == 0 else max(1, cells // 2)
+            wave = video_ids[measured : min(depth, measured + wave_size)]
+            if not wave:
+                break
+            wave_scores = await asyncio.gather(
+                *(motion_score(v, motion_index, client) for v in wave)
+            )
+            scored.extend(zip(wave, wave_scores, strict=True))
+            measured += len(wave)
+            moving = sum(
+                1
+                for _, score in scored
+                if not motion.is_static(score, config.filtering.static_threshold)
+            )
+            if moving >= cells:
+                break
+    motion_secs = time.monotonic() - motion_started
+
+    head = [v for v, _ in scored]
+    tail = video_ids[measured:]
+    scores = [score for _, score in scored]
+
+    # One line per selection, because these two phases are where a slow wall
+    # actually spends its time and neither is visible from the outside. A near-
+    # exact 15s on `origin` means its httpx timeout expired and the countries
+    # came back empty -- which is swallowed on purpose (diversity is a
+    # preference) but silently changes WHICH videos reach the wall, since
+    # origin.diversify then has nothing to reorder by.
+    logger.info(
+        "select origin=%.2fs (%d/%d countries) motion=%.2fs (%d of %d measured)",
+        origin_secs,
+        resolved_countries,
+        len(video_ids),
+        motion_secs,
+        len(head),
+        depth,
+    )
+    timings = {
+        "origin": round(origin_secs, 2),
+        "countries": resolved_countries,
+        "motion": round(motion_secs, 2),
+        "measured": len(head),
+        "depth": depth,
+    }
 
     result = motion.rank(
         list(zip(head, scores, strict=True)),
@@ -210,12 +364,15 @@ async def select_videos(
         threshold=config.filtering.static_threshold,
     )
     result["reserves"] = result["reserves"] + tail
+    result["timings"] = timings
     return result
 
 
 def videos_message(
-    config: Config, resolved: dict, query: str, cache_dir: Path, selection: dict
+    config: Config, resolved: dict, query: str, selection: dict, units_spent_today: int
 ) -> dict:
+    """Shape one resolved set for the wire. Pure -- the spend is passed in
+    rather than read, so this stays synchronous for one number."""
     items = resolved["items"]
     note = resolved["note"] or ("no_results" if not items else None)
     return {
@@ -227,52 +384,204 @@ def videos_message(
         "from_cache": resolved["from_cache"],
         "note": note,
         "static_relaxed": selection["relaxed"],
-        "units_spent_today": budget.spent(cache_dir),
+        # Phase timings, on the wire rather than only in the log. Container
+        # stdout is not reliably readable from outside a deployment, and the
+        # question these answer -- where did fifteen seconds go -- is asked
+        # from a browser.
+        "timings": selection.get("timings") or {},
+        "units_spent_today": units_spent_today,
         "daily_limit_units": config.quota.daily_limit_units,
     }
 
 
 def create_app(
-    config_path: Path, cache_dir: Path, settings: Settings, log_dir: Path | None = None
+    store: Store,
+    settings: Settings,
+    *,
+    default_config_path: Path = DEFAULT_CONFIG_PATH,
 ) -> FastAPI:
-    app = FastAPI(title="yt matrix")
     manager = ConnectionManager()
-    log_dir = log_dir if log_dir is not None else config_path.parent / "logs"
 
-    # The query actually on the wall, restored from disk so a restart or a
-    # reload keeps showing what it was showing -- reloads are free, and only an
-    # explicit "New" spends quota. Kept out of config.yaml: writing every
-    # generated query to a committed file would churn git constantly, and the
-    # file's `query` field stays meaningful as the manual fallback.
-    state: dict = wallstate.load(cache_dir)
+    # Wrapped here rather than at the call sites so nothing downstream has to
+    # know: motion scores, origins and content boxes are immutable per video, so
+    # a warm container answers them from memory instead of paying an R2 round
+    # trip each on every resolution. See MemoStore for what it refuses to cache
+    # and why -- config and the quota ledger must always come off the wire.
+    store = MemoStore(store)
 
-    def effective_query(config: Config) -> str:
-        return state["query"] or config.query
+    # One lock per cache key currently being searched for, shared by every
+    # request this process serves -- see `resolve_videos`. It lives here rather
+    # than at module scope so two apps in one test session cannot collide.
+    inflight: dict[str, asyncio.Lock] = {}
 
-    async def current_videos(source: str | None = None, prompt: str | None = None) -> dict:
-        config = load_config(config_path)
-        query = effective_query(config)
+    # Serialises the read-merge-write in `put_config`. Config is one shared
+    # document and a save reads it, merges the edit and writes it back across
+    # two awaits, so two people saving at the same moment would both read the
+    # same original and the second write would silently discard the first
+    # person's change. One process, so one lock is enough.
+    config_write_lock = asyncio.Lock()
+
+    # Motion scores and origins, one object each rather than one per video, held
+    # in memory and flushed behind the response. See ytmatrix/derived.py for why
+    # -- against R2 the per-video shape cost ~82 round trips on the critical
+    # path of every fresh query. Per-app rather than module-level so two apps in
+    # one test session cannot share state.
+    motion_index = DerivedIndex(store, "motion/index.json")
+    origin_index = DerivedIndex(store, "origin/index.json")
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        """Flush the derived indexes on the way out, rather than losing them.
+
+        Cloudflare sends SIGTERM when the container goes to sleep, which cancels
+        any background flush still in flight -- so without this, whatever was
+        measured in the final minutes of a session is discarded and re-measured
+        on the next wake. Waiting is safe: the platform allows up to fifteen
+        minutes for a graceful exit and this needs two puts.
+        """
+        yield
+        await motion_index.aclose()
+        await origin_index.aclose()
+
+    app = FastAPI(title="yt matrix", lifespan=lifespan)
+
+    def user_of(request: Request) -> str:
+        """Who is asking, for the query log and nothing else.
+
+        Set by the Worker after it validated the Access JWT. Nothing branches
+        on it: config is shared and the current query lives in the caller's
+        own browser, so the server has no per-user state to look up.
+        """
+        return (request.headers.get("x-wall-user") or "").strip().lower()
+
+    def region_of(request: Request) -> str | None:
+        """Which region YouTube should rank for, from Cloudflare's view of the
+        browser.
+
+        Absent locally -- there is no Worker in front of `./run.sh` -- and that
+        is the right answer there: with no regionCode the API infers one from
+        the caller, which on a laptop is the operator's own country. Pinning it
+        in production is what makes the deployed wall agree with the local one
+        instead of ranking for whichever datacenter woke up.
+        """
+        raw = (request.headers.get("x-wall-region") or "").strip().upper()
+        # Two letters or nothing: anything else is not an ISO country and would
+        # make the API reject the whole search rather than ignore one parameter.
+        return raw if len(raw) == 2 and raw.isalpha() else None
+
+    async def shared_config() -> Config:
+        return await load_config(store, default_path=default_config_path)
+
+    async def usable_query(
+        config: Config, query: str | None, region_code: str | None = None
+    ) -> tuple[str, list[dict] | None]:
+        """Which query to put on the wall, and the cached results to serve it.
+
+        A query supplied by the browser is honoured only if the shared cache
+        already has it -- stale included. The browser replays whatever is in
+        its localStorage on every load and every WebSocket reconnect, and a
+        cache miss there must never become a 100-unit search: spending is the
+        New query button's job and nothing else's (gotcha 2). An unknown query
+        silently falls back to the shared config query.
+
+        Stale counts as known on purpose. Expiry must not quietly move
+        somebody's wall back to the shared query -- the ids are the same ones
+        they were already watching.
+
+        The items come back with the decision rather than being looked up
+        again downstream, and that is the whole point of the return shape.
+        Re-reading would apply the TTL a second time, and an expired entry
+        would miss and fall through to a search -- so a client query would be
+        free only until it aged out, and a connection that flaps after that
+        would cost 100 units a reconnect, per user. Handing the items over
+        makes searching structurally impossible on this path rather than
+        merely unintended.
+
+        The consequence, accepted deliberately: a client query's results are
+        never refreshed on expiry. The query is fixed until someone presses
+        New query, and re-running the same search buys a slightly different
+        fifty videos for 100 units -- a bad trade. The fallback path (no
+        client query, or an unknown one) is unchanged and still refreshes.
+        """
+        if not query:
+            return config.query, None
+        params = search_params_for(config, query, region_code)
+        cached = await cache.read(store, params, config.cache.ttl_hours, allow_stale=True)
+        if cached is None:
+            return config.query, None
+        return query, cached
+
+    async def videos_for(
+        config: Config,
+        query: str,
+        *,
+        source: str,
+        email: str,
+        prompt: str | None = None,
+        cached: list[dict] | None = None,
+        region_code: str | None = None,
+        extra_timings: dict | None = None,
+    ) -> dict:
+        # `extra_timings` carries phases this function cannot see -- currently
+        # the Gemini call, which happens in the route before a query exists to
+        # resolve. Reported on the wire rather than only in the log, because the
+        # question these answer gets asked from a browser.
+        started = time.monotonic()
+        if cached is not None:
+            # A query the caller supplied that the shared cache already holds.
+            # Served from what usable_query found and never re-resolved, so
+            # this branch cannot reach youtube.search at all -- see the note
+            # in usable_query about why the items travel with the decision.
+            resolved = {"items": cached, "from_cache": True, "note": None}
+        else:
+            try:
+                resolved = await resolve_videos(
+                    config,
+                    store,
+                    settings.youtube_api_key,
+                    query,
+                    global_limit_units=settings.global_daily_units,
+                    inflight=inflight,
+                    region_code=region_code,
+                )
+            except BudgetExceededError as exc:
+                raise HTTPException(status_code=429, detail=str(exc)) from exc
+            except youtube.QuotaExceededError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "YouTube API daily quota exceeded and no cached results are available."
+                    ),
+                ) from exc
+            except youtube.SearchError as exc:
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        video_ids = [item["video_id"] for item in resolved["items"]]
+        # Loaded lazily: one get each on a cold container, then never again.
+        await motion_index.load()
+        await origin_index.load()
+        selection = await select_videos(
+            config, video_ids, motion_index, origin_index, settings.youtube_api_key
+        )
+        # Behind the response, not in front of it. A lost flush costs a
+        # recomputation, which is what the first request paid anyway.
+        motion_index.schedule_flush()
+        origin_index.schedule_flush()
+        selection["timings"] = {
+            **(selection.get("timings") or {}),
+            **(extra_timings or {}),
+            # Only present on a real search, so its absence says "cache hit"
+            # rather than "instant".
+            **({"search": resolved["search_secs"]} if "search_secs" in resolved else {}),
+            "total": round(time.monotonic() - started, 2),
+        }
+        message = videos_message(config, resolved, query, selection, await budget.spent(store))
+
         # Every resolution is logged, including plain reloads: the log is a
         # record of what was on the wall and when, not just of what was newly
         # searched. `from_cache` distinguishes the two.
-        source = source or ("generated" if state["query"] else "config")
-        try:
-            resolved = await resolve_videos(config, cache_dir, settings.youtube_api_key, query)
-        except BudgetExceededError as exc:
-            raise HTTPException(status_code=429, detail=str(exc)) from exc
-        except youtube.QuotaExceededError as exc:
-            raise HTTPException(
-                status_code=503,
-                detail="YouTube API daily quota exceeded and no cached results are available.",
-            ) from exc
-        except youtube.SearchError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        video_ids = [item["video_id"] for item in resolved["items"]]
-        selection = await select_videos(config, video_ids, cache_dir, settings.youtube_api_key)
-        message = videos_message(config, resolved, query, cache_dir, selection)
-
-        querylog.append(
-            log_dir,
+        await querylog.append(
+            store,
             querylog.build_entry(
                 query=query,
                 source=source,
@@ -285,6 +594,7 @@ def create_app(
                 prompt=prompt,
                 note=message["note"],
             ),
+            email=email,
         )
         return message
 
@@ -292,21 +602,17 @@ def create_app(
     async def healthz() -> dict:
         return {"status": "ok"}
 
-    @app.get("/")
-    async def player_page() -> FileResponse:
-        return FileResponse(STATIC_DIR / "player.html")
-
-    @app.get("/config")
-    async def config_page() -> FileResponse:
-        return FileResponse(STATIC_DIR / "config.html")
-
     @app.get("/api/config")
     async def get_config() -> dict:
-        return load_config(config_path).model_dump(mode="json")
+        return (await shared_config()).model_dump(mode="json")
 
     @app.put("/api/config")
     async def put_config(payload: dict) -> dict:
-        previous = load_config(config_path)
+        async with config_write_lock:
+            return await _save_config(payload)
+
+    async def _save_config(payload: dict) -> dict:
+        previous = await shared_config()
         try:
             # Merged, not replaced: an omitted section means "leave it alone".
             # Validating the payload alone would reset every section the
@@ -323,23 +629,14 @@ def create_app(
                 detail=exc.errors(include_url=False, include_context=False),
             ) from exc
 
-        save_config(new_config, config_path)
+        await save_config(new_config, store)
 
-        # Typing a query by hand is an override: it must beat whatever Gemini
-        # last generated, or the config page would appear to do nothing.
-        if previous.query != new_config.query:
-            state["query"] = None
-            wallstate.save(cache_dir, state)
-
+        # Config only. The server cannot broadcast a video set any more: it does
+        # not know what query any given browser is watching -- that lives in
+        # each browser's own localStorage. Each client decides for itself
+        # whether the change means it has to refetch, and whether a hand-typed
+        # config query should override the one it had stored.
         await manager.broadcast({"type": "config", "config": new_config.model_dump(mode="json")})
-
-        # Only a change to the search parameters can change the video set.
-        # Cosmetic edits must not tear down eight running players.
-        if search_params_for(previous) != search_params_for(new_config) or (
-            previous.grid.cells != new_config.grid.cells
-        ):
-            await manager.broadcast(await current_videos())
-
         return {"status": "ok"}
 
     @app.post("/api/cache-status")
@@ -348,7 +645,7 @@ def create_app(
             # Same merge as the PUT, so the quota indicator predicts what
             # saving would actually do rather than what the payload says.
             candidate = Config.model_validate(
-                merge_config(load_config(config_path).model_dump(mode="json"), payload)
+                merge_config((await shared_config()).model_dump(mode="json"), payload)
             )
         except ValidationError as exc:
             # include_context=False matters: the context of a custom validator
@@ -359,31 +656,42 @@ def create_app(
                 detail=exc.errors(include_url=False, include_context=False),
             ) from exc
         params = search_params_for(candidate)
-        hit = cache.read(cache_dir, params, candidate.cache.ttl_hours) is not None
+        hit = await cache.read(store, params, candidate.cache.ttl_hours) is not None
         return {
             "would_hit": hit,
             "quota_cost": 0 if hit else budget.SEARCH_COST_UNITS,
-            "units_spent_today": budget.spent(cache_dir),
+            "units_spent_today": await budget.spent(store),
             "daily_limit_units": candidate.quota.daily_limit_units,
         }
 
     @app.get("/api/videos")
-    async def get_videos() -> dict:
-        return await current_videos()
+    async def get_videos(request: Request, query: str | None = None) -> dict:
+        config = await shared_config()
+        region_code = region_of(request)
+        chosen, cached = await usable_query(config, query, region_code)
+        return await videos_for(
+            config,
+            chosen,
+            # `cached` is non-None exactly when the caller's own query was
+            # honoured, so it is also the answer to "where did this come from".
+            source="client" if cached is not None else "config",
+            email=user_of(request),
+            cached=cached,
+            region_code=region_code,
+        )
 
     @app.get("/api/content-box/{video_id}")
     async def content_box(video_id: str) -> dict:
         """Where the actual picture sits inside this video's 16:9 frame.
 
         Thumbnails come from i.ytimg.com, which is not the Data API and costs
-        no quota. Results are cached on disk: a video's shape never changes.
+        no quota. Results are cached forever: a video's shape never changes.
         """
-        box_cache = cache_dir / "content-boxes"
-        cached = box_cache / f"{video_id}.json"
-        if cached.exists():
+        raw = await store.get(f"contentbox/{video_id}.json")
+        if raw is not None:
             try:
-                return json.loads(cached.read_text())
-            except (json.JSONDecodeError, OSError):
+                return json.loads(raw)
+            except json.JSONDecodeError:
                 pass  # Re-fetch rather than fail.
 
         url = letterbox.THUMBNAIL_URL.format(video_id=video_id)
@@ -399,15 +707,12 @@ def create_app(
             # A missing thumbnail is not worth failing a cell over.
             return dict(letterbox.FULL_FRAME)
 
-        box_cache.mkdir(parents=True, exist_ok=True)
-        tmp = cached.with_name(cached.name + ".tmp")
-        tmp.write_text(json.dumps(box))
-        tmp.replace(cached)
+        await store.put(f"contentbox/{video_id}.json", json.dumps(box).encode("utf-8"))
         return box
 
     @app.post("/api/new-query")
-    async def new_query(payload: dict | None = None) -> dict:
-        """Invent a fresh query with Gemini and put it on the wall.
+    async def new_query(request: Request, payload: dict | None = None) -> dict:
+        """Invent a fresh query with Gemini and return it to the caller.
 
         An optional `prompt` is the operator's steer -- a metaprompt, not a
         raw query. It goes to Gemini together with the app's standing guidance
@@ -418,12 +723,17 @@ def create_app(
         Never called implicitly: only the New query button, ?new=true, or the
         prompt box. A generated query is a cache miss by definition and costs
         100 units.
+
+        The result is returned, not broadcast. Config is shared but walls are
+        not -- the caller stores this query in its own localStorage and nobody
+        else's wall moves.
         """
-        raw_prompt = (payload or {}).get("prompt")
+        payload = payload or {}
+        raw_prompt = payload.get("prompt")
         # Whitespace-only is no prompt at all -- normalise to None so "manual"
         # never gets recorded for an empty box.
         prompt = raw_prompt.strip() or None if isinstance(raw_prompt, str) else None
-        config = load_config(config_path)
+        config = await shared_config()
         if not config.query_generation.enabled:
             raise HTTPException(status_code=409, detail="query_generation.enabled is false")
         if not settings.gemini_api_key:
@@ -433,32 +743,56 @@ def create_app(
         # Refuse before calling Gemini, not after: a generated query is a cache
         # miss by definition, so generating one we cannot then search for wastes
         # a Gemini call and leaves the wall unchanged anyway.
-        if budget.would_exceed(cache_dir, config.quota.daily_limit_units):
+        if await budget.would_exceed(
+            store,
+            config.quota.daily_limit_units,
+            global_limit_units=settings.global_daily_units,
+        ):
             raise HTTPException(
                 status_code=429,
                 detail=(
                     f"daily search budget of {config.quota.daily_limit_units} units is spent "
-                    f"({budget.spent(cache_dir)} used); keeping the current query."
+                    f"({await budget.spent(store)} used); keeping the current query."
                 ),
             )
 
+        # The avoid-list lives in the caller's browser now, so it arrives on the
+        # request rather than being read from disk.
+        raw_history = payload.get("history")
+        if not isinstance(raw_history, list):
+            raw_history = []
+        # Sliced before it is converted, never after. Only the tail is ever
+        # used, and the length of the posted list is the caller's choice rather
+        # than ours -- the browser caps its own history, but the request body is
+        # not the browser. Guarded, because `history[-0:]` is `history[0:]`, the
+        # whole list: a config of 0, which means "do not avoid repeats", would
+        # otherwise hand Gemini maximum avoidance and a prompt carrying every
+        # query this browser has ever stored.
+        keep = config.query_generation.avoid_repeats
+        avoid = [str(q) for q in raw_history[-keep:]] if keep else []
+
+        gemini_started = time.monotonic()
         try:
             query = await gemini.generate_query(
                 config.query_generation.theme,
-                state["history"][-config.query_generation.avoid_repeats :],
+                avoid,
                 config.query_generation.model,
                 settings.gemini_api_key,
                 instruction=prompt,
             )
         except gemini.QueryGenerationError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+        gemini_secs = round(time.monotonic() - gemini_started, 2)
 
-        state["query"] = query
-        state["history"].append(query)
-        wallstate.save(cache_dir, state)
-        message = await current_videos(source="manual" if prompt else "generated", prompt=prompt)
-        await manager.broadcast(message)
-        return message
+        return await videos_for(
+            config,
+            query,
+            source="manual" if prompt else "generated",
+            email=user_of(request),
+            prompt=prompt,
+            region_code=region_of(request),
+            extra_timings={"gemini": gemini_secs},
+        )
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
@@ -469,8 +803,5 @@ def create_app(
                 await websocket.receive_text()
         except WebSocketDisconnect:
             manager.disconnect(websocket)
-
-    if STATIC_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     return app

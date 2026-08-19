@@ -28,5 +28,10 @@ class Settings(BaseSettings):
     # YouTube key does.
     gemini_api_key: str | None = Field(default=None, validation_alias="GEMINI_API_KEY")
 
+    # Google's project-wide daily allowance. Deliberately not in config.yaml:
+    # every wall spends from the same API key, and config is shared and
+    # editable, so this ceiling has to sit somewhere no user can raise it.
+    global_daily_units: int = 10_000
+
     host: str = "0.0.0.0"
     port: int = 8444

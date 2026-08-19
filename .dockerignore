@@ -1,0 +1,13 @@
+.git
+.venv
+dist
+cache
+logs
+runtime
+docs
+tests
+static
+node_modules
+__pycache__
+*.pyc
+.env
