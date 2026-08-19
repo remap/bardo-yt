@@ -518,6 +518,8 @@ async function prerollOne(player, index, token, deadline) {
 }
 
 async function prerollCurrentSet(token) {
+  const prerollStarted = performance.now();
+  wlog(`preroll start (generation ${token}) -- nothing plays until every cell has buffered`);
   const set = livePlayers();
   gridEl.dataset.preroll = "true";
 
