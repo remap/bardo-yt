@@ -52,6 +52,53 @@ async function tfetch(label, url, init) {
 }
 
 wlog("player.js loaded");
+
+// How long to keep asking while the container wakes.
+//
+// A sleeping or newly deployed container cannot answer immediately, and
+// @cloudflare/containers says so in prose rather than JSON: a 500 whose body is
+// "Failed to start container: ..." while it boots, or a 503 explaining that an
+// instance is still being provisioned, which its own message warns "may take a
+// few minutes". Neither is an error in this app and neither should be shown as
+// one -- but the first load used to parse the body as JSON, throw, and leave
+// the wall hung on a blank page with nothing retrying and nothing explaining.
+const WAKE_DELAYS_MS = [0, 400, 800, 1500, 2500, 4000, 6000, 8000, 10000, 10000];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** GET a JSON endpoint, waiting out a container that is still starting. */
+async function fetchJsonPatiently(label, url) {
+  for (let attempt = 0; attempt < WAKE_DELAYS_MS.length; attempt += 1) {
+    if (WAKE_DELAYS_MS[attempt]) await sleep(WAKE_DELAYS_MS[attempt]);
+    let response;
+    try {
+      response = await tfetch(label, url);
+    } catch (error) {
+      wlog(`${label} could not be reached (attempt ${attempt + 1}), retrying`, error);
+      setStatus("waiting for the server…", "busy");
+      continue;
+    }
+    if (response.ok) {
+      try {
+        return await response.json();
+      } catch (error) {
+        // A 200 that is not JSON is not something waiting will fix.
+        wlog(`${label} returned 200 but not JSON -- giving up`, error);
+        return null;
+      }
+    }
+    const body = await response.text().catch(() => "");
+    wlog(
+      `${label} ${response.status} (attempt ${attempt + 1}/${WAKE_DELAYS_MS.length}): ` +
+        `${body.slice(0, 160)}`,
+    );
+    setStatus(
+      response.status === 503 ? "starting the server, this can take a minute…" : "waiting for the server…",
+      "busy",
+    );
+  }
+  return null;
+}
 import {
   clearQuery,
   clearWall,
@@ -136,7 +183,6 @@ const PAUSE_CONFIRM_ATTEMPTS = 8;
 const PAUSE_CONFIRM_MS = 120;
 const LOOP_POLL_MS = 500;
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function livePlayers() {
   return players.filter(Boolean);
@@ -680,6 +726,15 @@ let seededMuteFromConfig = false;
 let seededFollowFromConfig = false;
 
 async function requestNewQuery(prompt = null) {
+  if (!config) {
+    // The button is reachable before the first resync finishes -- and if that
+    // resync failed on a waking container, config is still null. Generating
+    // now would spend 100 units and then throw in applyVideos on
+    // cellCount(config.grid), which is exactly what happened on a cold start.
+    wlog("refusing to generate: no config yet");
+    setStatus("still waiting for the server — try again in a moment", "error");
+    return false;
+  }
   const seq = ++applySeq;
   generating = true;
   const history = loadHistory();
@@ -733,7 +788,15 @@ async function requestNewQuery(prompt = null) {
 async function resync() {
   const seqAtEntry = applySeq + 1;
   wlog(`resync start (seq ${seqAtEntry})`);
-  config = await (await tfetch("GET /api/config", "/api/config")).json();
+  const fetchedConfig = await fetchJsonPatiently("GET /api/config", "/api/config");
+  if (!fetchedConfig) {
+    // Nothing below can run without it -- cellCount(config.grid) is the first
+    // thing applyVideos does. Better to say so than to hang on a blank page.
+    wlog("could not load config -- the wall cannot start");
+    setStatus("could not reach the server — reload to try again", "error");
+    return;
+  }
+  config = fetchedConfig;
 
   // Seed once. On a later reconnect the button, not the file, is the truth.
   if (!seededMuteFromConfig) {
@@ -843,15 +906,23 @@ async function resync() {
   applyVideos(message);
 }
 
-// The one way to spend 100 units. Deliberately a click and nothing else: no
-// Enter handler on the box, so a stray keystroke in a focused field cannot
-// launch a search. It reads whatever is in the prompt, and an empty box means
-// "generate from the standing theme alone" -- which the server records as
-// `generated` rather than `manual`.
+// The one way to spend 100 units. It reads whatever is in the prompt, and an
+// empty box means "generate from the standing theme alone" -- which the server
+// records as `generated` rather than `manual`.
 //
 // The box is a metaprompt, not a raw search: what you type goes to Gemini
 // together with the app's standing guidance, so "sadder, more piano" comes
 // back as a query that actually returns a wall's worth of moving video.
+// Enter in the box is the same act as clicking the button, so it IS the click
+// rather than a second path to the same code -- the button owns the disabled
+// state, the empty-box meaning and the spend, and a parallel handler would
+// eventually disagree with it about one of them.
+promptInput.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter" || newQueryButton.disabled || newQueryButton.hidden) return;
+  event.preventDefault();
+  newQueryButton.click();
+});
+
 newQueryButton.addEventListener("click", async () => {
   const prompt = promptInput.value.trim();
   promptInput.disabled = true;
@@ -1063,6 +1134,38 @@ hoverUnmuteCheckbox.addEventListener("change", () => {
 // Scroll to zoom, anchored on the pointer. passive:false because the page
 // must not scroll underneath -- the wall is a fixed-height layout and a
 // bubbling wheel event would fight the zoom.
+// Wheel events arrive far faster than the browser paints -- a trackpad emits
+// them in bursts of dozens -- and each one used to do its own layout write, so
+// the compositor was handed more work than it could land in a frame and the
+// zoom visibly stuttered. The deltas are accumulated instead and applied once
+// per animation frame, which is the rate the screen can actually show.
+//
+// Reading the cell's bounds is deliberately still done per event: a
+// getBoundingClientRect is a read, not a write, and the cursor position it is
+// measured against is what makes the zoom cursor-anchored.
+let pendingZoom = null;
+
+function flushZoom() {
+  const job = pendingZoom;
+  pendingZoom = null;
+  if (!job) return;
+  const { cell, index, width, height, deltaY, x, y } = job;
+  // The cell may have been rebuilt out from under a queued frame.
+  if (!cell.isConnected) return;
+  const view = zoomAt(
+    views.get(index) ?? IDENTITY_VIEW,
+    width,
+    height,
+    contentBoxes.get(cell.dataset.videoId),
+    deltaY,
+    x,
+    y,
+  );
+  views.set(index, view);
+  applyCoverFit(cell);
+  cell.dataset.zoomed = view.zoom > 1.001 ? "true" : "false";
+}
+
 gridEl.addEventListener(
   "wheel",
   (event) => {
@@ -1072,18 +1175,32 @@ gridEl.addEventListener(
 
     const index = [...gridEl.children].indexOf(cell);
     const bounds = cell.getBoundingClientRect();
-    const view = zoomAt(
-      views.get(index) ?? IDENTITY_VIEW,
-      bounds.width,
-      bounds.height,
-      contentBoxes.get(cell.dataset.videoId),
-      event.deltaY,
-      event.clientX - bounds.left,
-      event.clientY - bounds.top,
-    );
-    views.set(index, view);
-    applyCoverFit(cell);
-    cell.dataset.zoomed = view.zoom > 1.001 ? "true" : "false";
+    const x = event.clientX - bounds.left;
+    const y = event.clientY - bounds.top;
+
+    if (pendingZoom && pendingZoom.index === index) {
+      // Same cell, same frame: sum the deltas so no scrolling is lost, and
+      // track the cursor to wherever it ended up.
+      pendingZoom.deltaY += event.deltaY;
+      pendingZoom.x = x;
+      pendingZoom.y = y;
+      return;
+    }
+
+    // A different cell mid-frame: land the queued one first rather than
+    // dropping it.
+    if (pendingZoom) flushZoom();
+
+    pendingZoom = {
+      cell,
+      index,
+      width: bounds.width,
+      height: bounds.height,
+      deltaY: event.deltaY,
+      x,
+      y,
+    };
+    requestAnimationFrame(flushZoom);
   },
   { passive: false },
 );

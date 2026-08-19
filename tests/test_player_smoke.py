@@ -59,8 +59,28 @@ def _find_free_port() -> int:
         return sock.getsockname()[1]
 
 
+@pytest.fixture(scope="session")
+def _fresh_dist():
+    """Rebuild dist/ before any browser test runs.
+
+    The server serves dist/, not static/ -- the Worker's asset binding wants an
+    assembled bundle, and main.py mirrors that locally. dist/ is a copy, so
+    editing static/player.js changes nothing the browser sees until something
+    rebuilds it, and this suite would go on passing against the previous copy.
+    That is precisely the failure gotcha 14 exists to catch, so the suite
+    rebuilds rather than trusting whatever a previous command happened to leave
+    behind. The script is a handful of `cp`s -- once per session costs nothing.
+    """
+    subprocess.run(
+        ["bash", str(REPO_ROOT / "scripts" / "build-dist.sh")],
+        cwd=str(REPO_ROOT),
+        check=True,
+        capture_output=True,
+    )
+
+
 @pytest.fixture
-def running_server(tmp_path):
+def running_server(tmp_path, _fresh_dist):
     """A real server over TLS, backed by a seeded cache so no quota is spent."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(CONFIG))
@@ -500,10 +520,39 @@ def test_the_new_query_button_carries_the_prompt(running_server):
         browser.close()
 
 
-def test_enter_in_the_prompt_box_does_nothing(running_server):
-    """Removed deliberately: a 100-unit search should take a click, not a
-    keystroke in a field that happens to have focus. Guarding it so the
-    handler cannot come back unnoticed."""
+def test_enter_in_the_prompt_box_presses_the_query_button(running_server):
+    """Enter is how you finish typing in a text box, so it sends what you
+    typed -- exactly as if the button had been clicked, steer and all.
+
+    It is literally a .click() rather than a second call into
+    requestNewQuery: the button owns the disabled state, the empty-box
+    meaning and the 100-unit spend, and a parallel path would eventually
+    disagree with it about one of them.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        sent = {}
+        page.route(
+            "**/api/new-query",
+            lambda route: (sent.update(body=route.request.post_data or ""), route.abort())[-1],
+        )
+        page.fill("#prompt", "sadder, more piano")
+        page.press("#prompt", "Enter")
+        page.wait_for_timeout(1200)
+
+        assert sent, "Enter did not trigger a request"
+        assert "sadder, more piano" in sent["body"], "the steer must survive the keystroke"
+        browser.close()
+
+
+def test_enter_while_a_generation_is_running_does_not_start_a_second(running_server):
+    """The button disables itself for the duration of a search. Enter goes
+    through that same button, so it inherits the guard -- otherwise holding
+    the key down would spend 100 units per repeat."""
     with sync_playwright() as p:
         browser = p.chromium.launch()
         page = browser.new_context(ignore_https_errors=True).new_page()
@@ -511,12 +560,16 @@ def test_enter_in_the_prompt_box_does_nothing(running_server):
         page.wait_for_selector(".cell iframe", timeout=20_000)
 
         calls = []
-        page.route("**/api/new-query", lambda route: (calls.append(1), route.abort())[-1])
+        # Never answer, so the first generation stays in flight.
+        page.route("**/api/new-query", lambda route: calls.append(1))
         page.fill("#prompt", "sadder, more piano")
         page.press("#prompt", "Enter")
-        page.wait_for_timeout(1200)
+        page.wait_for_timeout(600)
+        page.press("#prompt", "Enter")
+        page.press("#prompt", "Enter")
+        page.wait_for_timeout(600)
 
-        assert calls == [], "Enter must not spend 100 units"
+        assert len(calls) == 1, f"one generation, not {len(calls)}"
         browser.close()
 
 
@@ -1262,3 +1315,71 @@ def test_a_reload_restores_the_wall_without_asking_the_server(running_server):
         assert requested == [], "a restored wall must cost no request at all"
         browser.close()
 
+
+def test_a_container_still_waking_is_waited_out_not_crashed_on(running_server):
+    """The first request to a sleeping or newly deployed container fails, and it
+    fails in prose rather than JSON.
+
+    @cloudflare/containers answers a cold start with a 500 whose body is
+    "Failed to start container: ..." while it boots, or a 503 saying an instance
+    is still being provisioned -- its own message warns that can take minutes.
+    Neither is an error in this app. Parsing either as JSON threw, left `config`
+    null with nothing retrying, and hung the wall on a blank page; pressing
+    Query: then spent 100 units and threw again on cellCount(config.grid).
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+
+        # Fail the config fetch exactly the way a waking container does, then
+        # let it through -- which is what happens once the port comes up.
+        attempts = []
+
+        def flaky_config(route):
+            attempts.append(1)
+            if len(attempts) <= 2:
+                route.fulfill(
+                    status=500,
+                    content_type="text/plain",
+                    body="Failed to start container: container is not running",
+                )
+            else:
+                route.continue_()
+
+        page.route("**/api/config", flaky_config)
+        page.goto(running_server, wait_until="load")
+
+        # The wall still starts, having waited the container out.
+        page.wait_for_selector(".cell iframe", timeout=30_000)
+        assert len(attempts) >= 3, "the config fetch should have been retried"
+        assert page.locator('.cell[data-empty="true"]').count() == 0
+        browser.close()
+
+
+def test_new_query_refuses_before_a_config_has_loaded(running_server):
+    """The button is reachable before the first resync finishes. Generating
+    without a config spends 100 units and then throws in applyVideos, which is
+    the worst of both -- so it declines and says so."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+
+        # Never let a config through, so `config` stays null.
+        page.route(
+            "**/api/config",
+            lambda route: route.fulfill(
+                status=500, content_type="text/plain", body="Failed to start container"
+            ),
+        )
+        spent = []
+        page.route(
+            "**/api/new-query",
+            lambda route: (spent.append(1), route.abort())[-1],
+        )
+        page.goto(running_server, wait_until="load")
+        page.wait_for_timeout(1500)
+        page.click("#new-query", force=True)
+        page.wait_for_timeout(800)
+
+        assert spent == [], "a generation without a config must not spend quota"
+        browser.close()

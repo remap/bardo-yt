@@ -279,6 +279,15 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     (marked `browser`) is the only thing that catches either. Run it after any
     change to `player.js` or the config wire format.
 
+    **The browser never loads `static/` — it loads `dist/`,** which
+    `scripts/build-dist.sh` assembles by copying. Both the Worker's asset
+    binding and `main.py` serve the bundle, not the source. So an edit to
+    `static/player.js` is invisible to a browser until something rebuilds, and
+    this suite once spent a whole run passing against the *previous* copy of a
+    file — the exact blindness gotcha 14 exists to prevent. The session-scoped
+    `_fresh_dist` fixture now rebuilds before the first browser test; do not
+    remove it in the belief that `npm run build` will have been run.
+
 26. **The container has no durable disk.** Every instance starts from a fresh
     copy of the image, so nothing may rely on a file surviving a restart — the
     cache, the log, the ledger and config all go through `Store` to R2
