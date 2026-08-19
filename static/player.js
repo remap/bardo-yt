@@ -52,7 +52,16 @@ async function tfetch(label, url, init) {
 }
 
 wlog("player.js loaded");
-import { clearQuery, loadHistory, loadQuery, pushHistory, saveQuery } from "./wallstate.js";
+import {
+  clearQuery,
+  clearWall,
+  loadHistory,
+  loadQuery,
+  loadWall,
+  pushHistory,
+  saveQuery,
+  saveWall,
+} from "./wallstate.js";
 
 const gridEl = document.getElementById("grid");
 const statusEl = document.getElementById("status");
@@ -113,6 +122,11 @@ let applySeq = 0;
 // ordering: whoever asked LAST wins among equals, but a deliberate request
 // outranks a housekeeping one.
 let generating = false;
+
+// A page load restores its stored wall once. Later resyncs are reconnects and
+// config pushes, which exist to go and look rather than to show what was
+// already there.
+let restoredThisLoad = false;
 
 const PREROLL_TIMEOUT_MS = 25000;
 const PREROLL_POLL_MS = 250;
@@ -621,6 +635,10 @@ function applyInPlace() {
 }
 
 function applyVideos(message) {
+  // Remembered before anything else, so a reload restores exactly this set
+  // rather than asking the server to resolve the query again and possibly
+  // choose differently.
+  saveWall(message);
   // Logged in full, on purpose. The query that reaches YouTube is not the text
   // typed into the box -- an empty box generates from the theme, and a steer is
   // a metaprompt -- so when the wall shows something unexpected, this is the
@@ -758,6 +776,29 @@ async function resync() {
   // and the wall unrendered.
   const seq = ++applySeq;
   const stored = loadQuery();
+
+  // A wall this browser has already been shown is restored as it was, with no
+  // request at all. Re-resolving the query was never free -- the search was a
+  // cache hit but select_videos still ran, which on the deployment is seconds
+  // of motion scoring -- and it was not deterministic either: reserves get
+  // consumed and scoring widens in waves, so a reload could legitimately come
+  // back with a different eight videos than the ones on screen a moment ago.
+  //
+  // Only on the FIRST resync of a page load. A later one is a reconnect or a
+  // config change, and those exist precisely to go and look.
+  if (!restoredThisLoad) {
+    restoredThisLoad = true;
+    const remembered = loadWall();
+    if (remembered) {
+      wlog(
+        `restored ${(remembered.video_ids ?? []).filter(Boolean).length} videos from this browser ` +
+          `for ${JSON.stringify(remembered.query)} -- no request needed`,
+      );
+      applyVideos(remembered);
+      return;
+    }
+  }
+
   wlog(
     stored
       ? `resync: replaying stored query ${JSON.stringify(stored)}`
@@ -797,6 +838,7 @@ async function resync() {
   if (stored && message.query !== stored) {
     wlog(`resync: stored query is gone from the cache, clearing it (server served ${JSON.stringify(message.query)})`);
     clearQuery();
+    clearWall();
   }
   applyVideos(message);
 }
@@ -1169,6 +1211,7 @@ connectSocket({
     if (overridesStoredQuery(previous, message.config)) {
       wlog("config's query field was edited -- that overrides this browser's stored query");
       clearQuery();
+      clearWall();
     }
     if (needsRefetch(previous, message.config)) {
       wlog("config change affects the search -- refetching");

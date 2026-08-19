@@ -1206,7 +1206,14 @@ def test_a_stored_query_the_shared_cache_no_longer_holds_is_cleared(running_serv
         # Stand in for a query that has aged out of the shared cache. Set after
         # the first load rather than via an init script, which would put it back
         # on the reload and prove nothing.
+        #
+        # The remembered wall is dropped alongside it, because a restored wall
+        # short-circuits the request entirely -- there is nothing to detect if
+        # the browser never asks. That is the point of restoring, and it just
+        # moves this clean-up to the first resync that does contact the server
+        # (a reconnect, or a search-affecting config change).
         page.evaluate("localStorage.setItem('ytmatrix.query', 'a query no cache ever held')")
+        page.evaluate("localStorage.removeItem('ytmatrix.wall')")
         page.reload(wait_until="load")
         page.wait_for_selector(".cell iframe", timeout=20_000)
 
@@ -1215,3 +1222,43 @@ def test_a_stored_query_the_shared_cache_no_longer_holds_is_cleared(running_serv
         assert "golden cover" in page.evaluate("document.getElementById('status').textContent")
         assert page.locator('.cell[data-empty="true"]').count() == 0
         browser.close()
+
+
+def test_a_reload_restores_the_wall_without_asking_the_server(running_server):
+    """The videos, not just the query that found them.
+
+    Replaying a query made the server resolve it again on every load: a cache
+    hit for the search, but select_videos still ran, which on the deployment is
+    seconds of motion scoring for a set the browser had already been shown. It
+    was not deterministic either -- reserves get consumed and scoring widens in
+    waves -- so a reload could legitimately come back with a different eight
+    videos than the ones on screen a moment earlier, which is what made
+    reloading feel like it broke the wall.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        before = page.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId ?? '')"
+        )
+        assert any(before), "the first load put something on the wall"
+
+        # Anything asked for on the reload would show up here.
+        requested = []
+        page.route(
+            "**/api/videos*",
+            lambda route: (requested.append(route.request.url), route.continue_())[-1],
+        )
+        page.reload(wait_until="load")
+        page.wait_for_selector(".cell iframe", timeout=20_000)
+
+        after = page.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId ?? '')"
+        )
+        assert after == before, "a reload must restore exactly the wall that was there"
+        assert requested == [], "a restored wall must cost no request at all"
+        browser.close()
+

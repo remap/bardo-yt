@@ -13,6 +13,7 @@
 
 const QUERY_KEY = "ytmatrix.query";
 const HISTORY_KEY = "ytmatrix.history";
+const WALL_KEY = "ytmatrix.wall";
 
 // Bounds the history that steers Gemini away from repeats. Without a cap this
 // grows forever in a browser that is never cleared.
@@ -76,4 +77,48 @@ export function pushHistory(query, storage) {
   if (!trimmed) return;
   const history = [...loadHistory(storage), trimmed].slice(-MAX_HISTORY);
   write(storage, HISTORY_KEY, JSON.stringify(history));
+}
+
+// --- the wall itself -------------------------------------------------------
+//
+// The videos, not just the query that found them. Replaying a query made the
+// server resolve it again on every load: a cache hit for the search, but
+// `select_videos` still ran, and on the deployment that meant seconds of motion
+// scoring for a set the browser had already been shown. Worse, a resolution is
+// not deterministic -- reserves get consumed, scoring widens in waves -- so a
+// reload could come back with a different eight videos than the ones on screen
+// a moment earlier, which is what made reloading feel like it broke the wall.
+//
+// So the whole message is kept. A reload restores exactly what was there, with
+// no request at all.
+//
+// Bounded on purpose: a message carries fifty ids plus their titles, which is a
+// few kilobytes. localStorage quotas are per-origin and small, and a write that
+// throws is swallowed -- so the wall would silently stop being restorable
+// rather than announce anything. Keeping one message is the whole point anyway.
+
+/** The last applied videos message, or null. */
+export function loadWall(storage) {
+  const raw = read(storage, WALL_KEY);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    // Anything without ids is not a wall, whatever else it is.
+    if (!parsed || !Array.isArray(parsed.video_ids)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function saveWall(message, storage) {
+  if (!message || !Array.isArray(message.video_ids)) return;
+  // `timings` describes the request that produced this, not the wall, and
+  // restoring it would report a stale measurement as though it were fresh.
+  const { timings, ...rest } = message;
+  write(storage, WALL_KEY, JSON.stringify({ ...rest, restored: true }));
+}
+
+export function clearWall(storage) {
+  write(storage, WALL_KEY, null);
 }
