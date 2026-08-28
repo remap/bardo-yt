@@ -164,3 +164,24 @@ test("resolveLayout skips a screen with zero resolved cells entirely", () => {
   });
   assert.ok(result.placements.every((p) => p.screenId === "F"));
 });
+
+test("resolveLayout orders placements screen-by-screen with row-major coordinates within each screen", () => {
+  // F: 3 cells → fitGrid(1800, 1400, 3) = {cols: 2, rows: 2}
+  //   cellWidth=900, cellHeight=700
+  //   row-major order: (0,0), (1,0), (0,1) → left/top pairs: (0,0), (900,0), (0,700)
+  // B: 1 cell → fitGrid(1200, 600, 1) = {cols: 1, rows: 1}
+  //   cellWidth=1200, cellHeight=600
+  //   B grid offset: x=1800, y=0
+  const result = resolveLayout(REAL_SCREENS, {
+    total: 4,
+    max_per_screen: 3,
+    screens: { F: 3, B: 1, C: "none", D: "none", A: "none", E: "none" },
+  });
+  assert.equal(result.totalCells, 4);
+  assert.deepEqual(result.placements, [
+    { screenId: "F", left: 0, top: 0, width: 900, height: 700 },
+    { screenId: "F", left: 900, top: 0, width: 900, height: 700 },
+    { screenId: "F", left: 0, top: 700, width: 900, height: 700 },
+    { screenId: "B", left: 1800, top: 0, width: 1200, height: 600 },
+  ]);
+});
