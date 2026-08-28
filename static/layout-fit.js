@@ -83,3 +83,28 @@ export function allocateScreenCounts({ total, maxPerScreen, screens, screenAreas
   for (const id of autoIds) counts[id] = shares[id];
   return counts;
 }
+
+const TARGET_CELL_ASPECT = 16 / 9;
+
+/**
+ * The cols x rows layout, among cols in 1..count, whose resulting cell
+ * aspect ratio is closest to 16:9 for a box of the given pixel size.
+ *
+ * rows = ceil(count / cols) rather than requiring an exact factor pair, so a
+ * prime count (5, 7, 11...) still gets a sensible rectangle instead of being
+ * forced into a single row or column -- the last row is simply short by
+ * however many cells cols*rows exceeds count, and the caller (buildCells)
+ * only ever creates `count` real cells, so that shortfall is an unfilled gap
+ * in the layout rather than an empty placeholder cell.
+ */
+export function fitGrid(width, height, count) {
+  if (count <= 0) return { cols: 0, rows: 0 };
+  let best = null;
+  for (let cols = 1; cols <= count; cols += 1) {
+    const rows = Math.ceil(count / cols);
+    const cellAspect = width / cols / (height / rows);
+    const distance = Math.abs(Math.log(cellAspect / TARGET_CELL_ASPECT));
+    if (!best || distance < best.distance) best = { cols, rows, distance };
+  }
+  return { cols: best.cols, rows: best.rows };
+}

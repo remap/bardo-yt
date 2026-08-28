@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { screenRectPx, allocateScreenCounts } from "./layout-fit.js";
+import { screenRectPx, allocateScreenCounts, fitGrid } from "./layout-fit.js";
 
 test("screenRectPx converts grid units to pixels, matching layout-driver's compute_rect", () => {
   // col*module_size + offset.x, row*module_size + offset.y, cols*module_size, rows*module_size --
@@ -91,4 +91,31 @@ test("explicit counts summing to the total leave nothing for auto screens", () =
     screenAreas: { A: 100, B: 100 },
   });
   assert.equal(counts.B, 0);
+});
+
+test("fitGrid on a near-16:9 box with a perfect-square count picks the square factor pair", () => {
+  // 1600x900 box, 4 cells: 2x2 gives 800x450 cells, exactly 16:9.
+  assert.deepEqual(fitGrid(1600, 900, 4), { cols: 2, rows: 2 });
+});
+
+test("fitGrid handles a count with no clean factor pair by allowing a partial last row", () => {
+  // 1200x600, N=3: candidates are 1x3 (cellAspect 1200/200=6), 2x2 (600/300=2),
+  // 3x1 (400/600=0.667) against a 16:9 (1.778) target -- 2x2 is closest, and
+  // its 4th cell is simply never rendered (buildCells only creates N cells).
+  assert.deepEqual(fitGrid(1200, 600, 3), { cols: 2, rows: 2 });
+});
+
+test("fitGrid on a single cell is always 1x1", () => {
+  assert.deepEqual(fitGrid(1800, 1400, 1), { cols: 1, rows: 1 });
+});
+
+test("fitGrid on a wide screen favors more columns than rows", () => {
+  // 1800x1400 box (roughly square-ish, 1.286:1), N=3: verified against the
+  // default allocation's F screen -- 2x2 is the closest fit (see Task 2's
+  // "real six-screen default" test for how N=3 arises here).
+  assert.deepEqual(fitGrid(1800, 1400, 3), { cols: 2, rows: 2 });
+});
+
+test("fitGrid returns 0x0 for a non-positive count", () => {
+  assert.deepEqual(fitGrid(1000, 1000, 0), { cols: 0, rows: 0 });
 });
