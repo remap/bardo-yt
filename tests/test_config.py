@@ -269,3 +269,48 @@ def test_the_config_page_payload_no_longer_disables_generation():
     assert merged.filtering.static_threshold == 3.5
     assert merged.quota.daily_limit_units == 5000
     assert merged.grid.cells == 16, "and the edit itself must still apply"
+
+
+# --- layout config ---------------------------------------------------------
+
+
+def test_layout_is_absent_by_default():
+    assert Config.model_validate(VALID).layout is None
+
+
+def test_layout_accepts_auto_and_none_and_explicit_counts():
+    data = {**VALID, "layout": {"screens": {"F": "auto", "D": "none", "C": 2}}}
+    layout = Config.model_validate(data).layout
+    assert layout.screens == {"F": "auto", "D": "none", "C": 2}
+    assert layout.total == 8  # default
+    assert layout.max_per_screen == 3  # default
+
+
+def test_layout_rejects_an_unknown_screen_value():
+    data = {**VALID, "layout": {"screens": {"F": "sometimes"}}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(data)
+
+
+def test_layout_total_cannot_exceed_max_search_results():
+    data = {**VALID, "layout": {"total": 51}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(data)
+
+
+def test_layout_rejects_an_explicit_count_over_max_per_screen():
+    data = {**VALID, "layout": {"max_per_screen": 3, "screens": {"C": 4}}}
+    with pytest.raises(ValidationError, match="max_per_screen"):
+        Config.model_validate(data)
+
+
+def test_layout_rejects_explicit_counts_summing_past_total():
+    data = {**VALID, "layout": {"total": 5, "max_per_screen": 10, "screens": {"C": 3, "D": 3}}}
+    with pytest.raises(ValidationError, match="total"):
+        Config.model_validate(data)
+
+
+def test_layout_rejects_unknown_keys():
+    data = {**VALID, "layout": {"colour": "blue"}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(data)

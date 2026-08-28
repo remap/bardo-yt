@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from enum import StrEnum
 from pathlib import Path
+from typing import Annotated, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -140,6 +141,43 @@ class QuotaConfig(Strict):
     daily_limit_units: int = Field(default=5000, ge=0)
 
 
+class LayoutConfig(Strict):
+    """Per-screen video counts for the /layout front end.
+
+    Entirely optional on Config -- its absence means "layout mode has never
+    been configured," and the /layout page falls back to its own client-side
+    defaults (see static/layout-page.js), which mirror the defaults here.
+    Screen ids are whatever static/layout/screens.json defines; this model
+    does not know or care what they are, so an id here that screens.json
+    does not have is silently ignored by the page, and a screen.json id
+    absent from `screens` defaults to "auto" there.
+    """
+
+    total: int = Field(default=8, ge=1, le=MAX_SEARCH_RESULTS)
+    max_per_screen: int = Field(default=3, ge=1)
+    screens: dict[str, Annotated[int, Field(ge=0)] | Literal["auto", "none"]] = Field(
+        default_factory=dict
+    )
+
+    @model_validator(mode="after")
+    def _explicit_counts_fit_the_budget(self) -> LayoutConfig:
+        explicit = {
+            screen_id: value for screen_id, value in self.screens.items() if isinstance(value, int)
+        }
+        for screen_id, count in explicit.items():
+            if count > self.max_per_screen:
+                raise ValueError(
+                    f"screen {screen_id!r} requests {count} but max_per_screen is "
+                    f"{self.max_per_screen}"
+                )
+        explicit_sum = sum(explicit.values())
+        if explicit_sum > self.total:
+            raise ValueError(
+                f"explicit screen counts sum to {explicit_sum} but total is {self.total}"
+            )
+        return self
+
+
 class Config(Strict):
     query: str
     grid: Grid
@@ -149,6 +187,7 @@ class Config(Strict):
     query_generation: QueryGenerationConfig = QueryGenerationConfig()
     filtering: FilteringConfig = FilteringConfig()
     quota: QuotaConfig = QuotaConfig()
+    layout: LayoutConfig | None = None
 
     @field_validator("query")
     @classmethod
