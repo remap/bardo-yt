@@ -23,7 +23,7 @@ test("explicit counts are kept exactly and none screens get zero", () => {
   });
   assert.equal(counts.A, 4);
   assert.equal(counts.B, 0);
-  assert.equal(counts.C, 16); // all remaining budget, one auto screen
+  assert.equal(counts.C, 10); // clamped to maxPerScreen; remaining 6 units unused
 });
 
 test("remaining budget splits across auto screens by area", () => {

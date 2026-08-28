@@ -52,14 +52,14 @@ export function allocateScreenCounts({ total, maxPerScreen, screens, screenAreas
     let allocated = 0;
     for (const id of autoIds) {
       const share = Math.floor((remaining * (screenAreas[id] ?? 0)) / totalArea);
-      // Only clamp during initial allocation if there are multiple auto screens
-      shares[id] = autoIds.length > 1 ? Math.min(share, maxPerScreen) : share;
+      shares[id] = Math.min(share, maxPerScreen);
       allocated += shares[id];
     }
 
-    // Largest screens first, skipping any already at the cap. The guard bounds
-    // the loop at "one full pass per unit of leftover" so a maxPerScreen of 0
-    // (nothing left to give) or every screen already capped cannot spin forever.
+    // Distribute leftover to largest screens first, respecting maxPerScreen.
+    // The guard bounds the loop at "one full pass per unit of leftover" so a
+    // maxPerScreen of 0 (nothing left to give) or every screen already capped
+    // cannot spin forever.
     const byAreaDesc = [...autoIds].sort((a, b) => (screenAreas[b] ?? 0) - (screenAreas[a] ?? 0));
     let leftover = remaining - allocated;
     let guard = byAreaDesc.length * maxPerScreen + 1;
