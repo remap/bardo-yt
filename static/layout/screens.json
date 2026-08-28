@@ -1,0 +1,13 @@
+{
+  "canvas": { "width": 3840, "height": 2160 },
+  "module_size": 200,
+  "layout_offset": { "x": 0, "y": 0 },
+  "screens": [
+    { "id": "F", "name": "Screen F", "grid": { "col": 0, "row": 0, "cols": 9, "rows": 7 } },
+    { "id": "B", "name": "Screen B", "grid": { "col": 9, "row": 0, "cols": 6, "rows": 3 } },
+    { "id": "C", "name": "Screen C", "grid": { "col": 9, "row": 3, "cols": 6, "rows": 3 } },
+    { "id": "D", "name": "Screen D", "grid": { "col": 9, "row": 6, "cols": 8, "rows": 2 } },
+    { "id": "A", "name": "Screen A", "grid": { "col": 9, "row": 8, "cols": 8, "rows": 2 } },
+    { "id": "E", "name": "Screen E", "grid": { "col": 1, "row": 7, "cols": 8, "rows": 2 } }
+  ]
+}
