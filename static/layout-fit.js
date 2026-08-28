@@ -108,3 +108,51 @@ export function fitGrid(width, height, count) {
   }
   return { cols: best.cols, rows: best.rows };
 }
+
+/**
+ * Turn a screens.json snapshot plus a layout config into an ordered, flat
+ * list of pixel placements -- one per cell, in the order wall-engine.js's
+ * flat cell index space uses (screen-by-screen in screensData order,
+ * row-major within each screen).
+ */
+export function resolveLayout(screensData, layoutConfig) {
+  const { canvas, module_size: moduleSize, layout_offset: offset, screens } = screensData;
+
+  const rects = screens.map((screen) => ({
+    id: screen.id,
+    rect: screenRectPx(screen.grid, moduleSize, offset),
+  }));
+  const screenAreas = Object.fromEntries(rects.map((s) => [s.id, s.rect.width * s.rect.height]));
+  const selections = Object.fromEntries(
+    screens.map((screen) => [screen.id, layoutConfig.screens?.[screen.id] ?? "auto"]),
+  );
+
+  const counts = allocateScreenCounts({
+    total: layoutConfig.total,
+    maxPerScreen: layoutConfig.max_per_screen,
+    screens: selections,
+    screenAreas,
+  });
+
+  const placements = [];
+  for (const { id, rect } of rects) {
+    const count = counts[id] ?? 0;
+    if (count <= 0) continue;
+    const { cols, rows } = fitGrid(rect.width, rect.height, count);
+    const cellWidth = rect.width / cols;
+    const cellHeight = rect.height / rows;
+    for (let index = 0; index < count; index += 1) {
+      const col = index % cols;
+      const row = Math.floor(index / cols);
+      placements.push({
+        screenId: id,
+        left: rect.x + col * cellWidth,
+        top: rect.y + row * cellHeight,
+        width: cellWidth,
+        height: cellHeight,
+      });
+    }
+  }
+
+  return { canvas, totalCells: placements.length, placements };
+}
