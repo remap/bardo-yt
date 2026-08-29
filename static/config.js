@@ -4,6 +4,27 @@ const field = (id) => document.getElementById(id);
 const quotaEl = field("quota");
 const resultEl = field("result");
 
+const layoutScreensEl = field("layout-screens");
+let screenIds = [];
+
+async function loadScreenIds() {
+  const response = await fetch("/static/layout/screens.json");
+  const data = await response.json();
+  screenIds = data.screens.map((screen) => screen.id);
+  layoutScreensEl.replaceChildren();
+  for (const id of screenIds) {
+    const label = document.createElement("label");
+    label.textContent = `Screen ${id}`;
+    const input = document.createElement("input");
+    input.id = `layout_screen_${id}`;
+    input.type = "text";
+    input.placeholder = "auto";
+    input.addEventListener("input", refreshQuota);
+    label.appendChild(input);
+    layoutScreensEl.appendChild(label);
+  }
+}
+
 const TEXT_FIELDS = ["query", "order", "video_duration", "safe_search", "relevance_language"];
 const NUMBER_FIELDS = ["cols", "rows", "start_offset"];
 const CHECK_FIELDS = ["loop", "autoplay_on_change"];
@@ -20,6 +41,13 @@ function fill(config) {
   field("start_offset").value = config.playback.start_offset;
   field("loop").checked = config.playback.loop;
   field("autoplay_on_change").checked = config.playback.autoplay_on_change;
+  const layout = config.layout ?? { total: 8, max_per_screen: 3, screens: {} };
+  field("layout_total").value = layout.total;
+  field("layout_max_per_screen").value = layout.max_per_screen;
+  for (const id of screenIds) {
+    const el = field(`layout_screen_${id}`);
+    if (el) el.value = String(layout.screens?.[id] ?? "auto");
+  }
 }
 
 // The last config the server sent. Edits are layered onto THIS rather than a
@@ -46,6 +74,16 @@ function collect() {
       autoplay_on_change: field("autoplay_on_change").checked,
       start_offset: Number(field("start_offset").value),
       loop: field("loop").checked,
+    },
+    layout: {
+      total: Number(field("layout_total").value),
+      max_per_screen: Number(field("layout_max_per_screen").value),
+      screens: Object.fromEntries(
+        screenIds.map((id) => {
+          const raw = field(`layout_screen_${id}`).value.trim();
+          return [id, raw === "" || raw === "auto" ? "auto" : raw === "none" ? "none" : Number(raw)];
+        }),
+      ),
     },
   };
 }
@@ -122,6 +160,7 @@ for (const id of CHECK_FIELDS) {
 }
 
 async function resync() {
+  await loadScreenIds();
   fill(await (await fetch("/api/config")).json());
   refreshQuota();
 }
