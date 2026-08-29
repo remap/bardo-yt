@@ -716,6 +716,18 @@ test("a changed cell count needs a refetch", () => {
   assert.equal(needsRefetch(before, after), true);
 });
 
+test("a layout-only change is a refetch when totalCellsFor says so, even with an unchanged grid", () => {
+  // /layout's config.grid never changes when someone edits total/max_per_screen/
+  // per-screen counts on the config page -- those live under config.layout,
+  // not config.grid -- so the default totalCellsFor (cellCount(config.grid))
+  // would miss this entirely. wall-engine.js instead passes
+  // (config) => computeLayout(config).totalCells, which does see it.
+  const before = { query: "a", search: {}, grid: { cols: 4, rows: 2 }, layout: { total: 8 } };
+  const after = { query: "a", search: {}, grid: { cols: 4, rows: 2 }, layout: { total: 12 } };
+  const totalCellsFor = (config) => config.layout.total;
+  assert.equal(needsRefetch(before, after, totalCellsFor), true);
+});
+
 test("a cosmetic change needs no refetch", () => {
   const before = { query: "a", search: {}, grid: { cols: 4, rows: 2 }, playback: { loop: true } };
   const after = { query: "a", search: {}, grid: { cols: 4, rows: 2 }, playback: { loop: false } };

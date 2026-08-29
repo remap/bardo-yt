@@ -85,12 +85,22 @@ function collect() {
     layout: {
       total: Number(field("layout_total").value),
       max_per_screen: Number(field("layout_max_per_screen").value),
-      screens: Object.fromEntries(
-        screenIds.map((id) => {
-          const raw = field(`layout_screen_${id}`).value.trim();
-          return [id, raw === "" || raw === "auto" ? "auto" : raw === "none" ? "none" : Number(raw)];
-        }),
-      ),
+      // Merged onto the previously-loaded screens, not rebuilt from scratch:
+      // screenIds comes from the current screens.json snapshot, which may be
+      // narrower than what was actually saved (loadScreenIds() degraded to []
+      // on a fetch failure, or a screen id was retired from screens.json but
+      // still has a saved override). Rebuilding from screenIds alone would
+      // silently drop those on the next Save -- the same class of bug the
+      // comment above collect() describes for query_generation.
+      screens: {
+        ...(loaded?.layout?.screens ?? {}),
+        ...Object.fromEntries(
+          screenIds.map((id) => {
+            const raw = field(`layout_screen_${id}`).value.trim();
+            return [id, raw === "" || raw === "auto" ? "auto" : raw === "none" ? "none" : Number(raw)];
+          }),
+        ),
+      },
     },
   };
 }

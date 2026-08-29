@@ -1,4 +1,3 @@
-# tests/test_layout_smoke.py
 """Browser smoke test for /layout: the wall must build across the real
 screens, the same class of check test_player_smoke.py does for /.
 
@@ -81,7 +80,16 @@ def running_server(tmp_path, _fresh_dist):
         "R7EH2TKJHYQ",
         "uSAPVDS2LUo",
     ]
+    # Real ids from a live search. Seeded to the full 50 a real search returns,
+    # because whether any given video is embeddable changes over time: with a
+    # reserve pool behind them, one that stops working is substituted and the
+    # cell count assertion stays true. Seeding only 8 makes this test fail for
+    # a reason that has nothing to do with the code under test.
     ids = [base[i % len(base)] for i in range(50)]
+    # cache.write is async and goes through a Store, not a directory -- the
+    # container has no durable disk. asyncio.run because this fixture is sync:
+    # calling it without awaiting builds a coroutine, seeds nothing, and every
+    # test in this file then sits waiting on a live search that never comes.
     asyncio.run(
         cache.write(
             FileStore(cache_dir),
@@ -123,6 +131,10 @@ def running_server(tmp_path, _fresh_dist):
             time.sleep(0.3)
         else:
             raise RuntimeError("server did not become healthy in time")
+        # localhost, NOT 127.0.0.1. YouTube rejects a 127.0.0.1 page as an embed
+        # origin with error 150 ("embedding disallowed") while accepting
+        # localhost against the very same server. Using the IP here makes every
+        # player fail for a reason that has nothing to do with this code.
         yield f"https://localhost:{port}/layout"
     finally:
         process.terminate()

@@ -293,10 +293,16 @@ export function classifyConfigChange(previous, next) {
 // broadcast itself.
 const SEARCH_KEYS = ["query", "search"];
 
-export function needsRefetch(previous, next) {
+// `totalCellsFor` defaults to the grid-page cell count so every existing
+// caller (and every existing test) keeps its exact behavior. /layout passes
+// its own `(config) => computeLayout(config).totalCells` so a layout-only
+// edit -- total/max_per_screen/per-screen counts, none of which touch
+// `config.grid` -- is recognised as structural too, without making the grid
+// page rebuild on a change that cannot affect it (see wall-engine.js).
+export function needsRefetch(previous, next, totalCellsFor = (config) => cellCount(config.grid)) {
   if (!previous) return true;
   if (SEARCH_KEYS.some((key) => differs(previous, next, key))) return true;
-  return cellCount(previous.grid) !== cellCount(next.grid);
+  return totalCellsFor(previous) !== totalCellsFor(next);
 }
 
 // Typing a query by hand on the config page is an override: it must beat

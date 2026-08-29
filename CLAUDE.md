@@ -64,9 +64,13 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 | `static/grid-logic.js` | Pure slot/reserve bookkeeping + config-change classification. Node-testable. |
 | `static/wallstate.js` | What *this browser* is watching: current query + history in `localStorage`. Every access is defensive. |
 | `static/socket.js` | WS connect with backoff; re-syncs on every (re)connect. |
-| `static/player.js` | YT IFrame players, DOM wiring, error substitution. |
-| `static/config.js` | The live editor and its quota-cost indicator. |
-| `scripts/build-dist.sh` | Assembles `dist/`: `player.html` → `index.html`, `config.html`, `static/*.js`. Not the test `.mjs` files. |
+| `static/wall-engine.js` | The actual player/DOM/YouTube-API engine (extracted from what used to be `player.js`): builds cells, pre-rolls, mute/audio targeting, zoom/pan, the context menu, the WS-driven config reconciliation. Exports `startWall({computeLayout})`; shared verbatim by `/` and `/layout`. |
+| `static/player.js` | Bootstraps the `/` grid page via `wall-engine.js`'s `startWall()`. Two lines. |
+| `static/layout-fit.js` | Pure per-screen allocation/fit math for `/layout` — how a total video budget splits across the six real screens and how each screen's cells tile to approximate 16:9. No DOM, no fetch; node-tested like `grid-logic.js`. |
+| `static/layout-page.js` | Bootstraps `/layout`: loads `static/layout/screens.json`, builds a screens-based `computeLayout` from `layout-fit.js`'s `resolveLayout`, and calls `wall-engine.js`'s `startWall({computeLayout})`. |
+| `static/layout/screens.json` | Vendored, hand-copied snapshot of `../layout-driver/config/screens.yaml`'s geometry (canvas size, module size, per-screen grid/offset). No live link — see gotcha 39. |
+| `static/config.js` | The live editor and its quota-cost indicator, including the Layout section (total/max_per_screen/per-screen overrides). |
+| `scripts/build-dist.sh` | Assembles `dist/`: `player.html` → `index.html`, `config.html`, `layout.html`, `static/*.js`, `static/layout/screens.json`. Not the test `.mjs` files. |
 | `tests/conftest.py` | Autouse guard: fails any default-suite test that reaches the live API. |
 
 ## Critical gotchas
@@ -134,9 +138,10 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 
 19. **Loop by restarting *before* the end, never on ENDED.** YouTube draws its
     end-screen suggestion grid over the video as it finishes, so by the time
-    ENDED fires the cards are already visible. The interval in `player.js`
-    seeks back `LOOP_GUARD_SECONDS` short of the end. The ENDED handler is a
-    backstop for when one slips through, not the mechanism.
+    ENDED fires the cards are already visible. The interval in
+    `wall-engine.js` seeks back `LOOP_GUARD_SECONDS` short of the end. The
+    ENDED handler is a backstop for when one slips through, not the mechanism.
+    Shared by `/` and `/layout` — both are driven by the one engine.
 
 21. **`pointer-events: none` on the iframe is load-bearing twice over.** It
     stops YouTube's hover chrome (gotcha 7) *and* it is the only reason the
@@ -229,14 +234,15 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     dutifully burns through all 42 spares trying to recover. The browser smoke
     test's fixture URL and `CERT_HOSTS` both depend on this.
 
-12. **`onYouTubeIframeAPIReady` is a race the module usually loses.**
-    `player.js` is an ES module, so it is deferred until after the document
-    parses, while `iframe_api` is injected during parsing and often finishes
-    first — especially warm. When it wins, it finds no callback registered and
-    never calls one; `apiReady` stays false and the wall renders blank with no
-    console error whatsoever. `whenYouTubeApiReady()` checks for an
-    already-loaded `YT.Player` before registering. Do not "simplify" it back
-    to a bare assignment.
+12. **`onYouTubeIframeAPIReady` is a race the module usually loses.** The
+    page's entry script (`player.js` on `/`, `layout-page.js` on `/layout`) is
+    an ES module, so it is deferred until after the document parses, while
+    `iframe_api` is injected during parsing and often finishes first —
+    especially warm. When it wins, it finds no callback registered and never
+    calls one; `apiReady` stays false and the wall renders blank with no
+    console error whatsoever. `whenYouTubeApiReady()`, in `wall-engine.js`
+    (shared by both pages), checks for an already-loaded `YT.Player` before
+    registering. Do not "simplify" it back to a bare assignment.
 
 13. **`Grid.cells` is a Python `@property`, so it is NOT in the JSON.**
     `model_dump()` emits only `cols` and `rows`. Reading `config.grid.cells`
@@ -276,16 +282,20 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 14. **Browser bugs need a browser test.** #12 and #13 were both invisible to
     the Python suite and the node tests — one is script-ordering, the other a
     serialization gap between two languages. `tests/test_player_smoke.py`
-    (marked `browser`) is the only thing that catches either. Run it after any
-    change to `player.js` or the config wire format.
+    (marked `browser`, covers `/`) and `tests/test_layout_smoke.py` (same
+    marker, covers `/layout`) are the only things that catch either. Run both
+    after any change to `wall-engine.js` — it drives both pages — and the
+    layout one after `layout-fit.js` or `layout-page.js` too. Run either after
+    a change to the config wire format.
 
     **The browser never loads `static/` — it loads `dist/`,** which
     `scripts/build-dist.sh` assembles by copying. Both the Worker's asset
     binding and `main.py` serve the bundle, not the source. So an edit to
-    `static/player.js` is invisible to a browser until something rebuilds, and
-    this suite once spent a whole run passing against the *previous* copy of a
-    file — the exact blindness gotcha 14 exists to prevent. The session-scoped
-    `_fresh_dist` fixture now rebuilds before the first browser test; do not
+    `static/wall-engine.js` is invisible to a browser until something
+    rebuilds, and this suite once spent a whole run passing against the
+    *previous* copy of a file — the exact blindness gotcha 14 exists to
+    prevent. The session-scoped `_fresh_dist` fixture now rebuilds before the
+    first browser test; do not
     remove it in the belief that `npm run build` will have been run.
 
 26. **The container has no durable disk.** Every instance starts from a fresh
@@ -339,7 +349,7 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     is honoured only when the shared cache holds it *under the current search
     params* (gotcha 28), so changing `search.order` makes every stored query
     unservable; each browser gets the config query back, and
-    `if (stored && message.query !== stored) clearQuery()` in `player.js`
+    `if (stored && message.query !== stored) clearQuery()` in `wall-engine.js`
     drops it. That is correct — their query genuinely cannot be served without
     spending 100 units per wall — but it is much broader than
     `overridesStoredQuery()`, which covers only the query field, and it
@@ -445,3 +455,29 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     Bad R2 credentials therefore surface as a 500 naming the exact URL, which
     is what an operator needs. Widening that catch would mask a storage outage
     behind shipped defaults and quietly serve everyone the wrong config.
+
+39. **`static/layout/screens.json` has no live link to `../layout-driver`.**
+    It is a hand-copied snapshot of that project's `config/screens.yaml`
+    geometry (canvas size, module size, each screen's grid and offset) — see
+    `layout-fit.js`'s `screenRectPx`, which deliberately mirrors
+    `../layout-driver/layout_server/config.py:compute_rect` so the two
+    projects draw the same pixel rects from the same numbers. Nothing checks
+    the two files still agree. If the venue's screen layout changes, this file
+    has to be re-copied by hand, and drift is silent — `/layout` will keep
+    rendering confidently against stale geometry.
+
+    **A `/layout` total larger than `config.grid.cols × rows` can surface a
+    still image `/` would never have shown.** `select_videos`
+    (`ytmatrix/server.py`) measures motion for exactly `config.grid.cells +
+    scan_depth` videos and appends everything past that depth to `reserves`
+    completely unmeasured (`tail` in `select_videos`) — that has always been
+    true and is fine for `/`, whose reserve pool only calls on those unscored
+    videos one at a time, as an `onError` substitute, and drops one that turns
+    out static back out. `/layout`'s `computeLayout(config).totalCells` (the
+    Layout config's `total`) is independent of `config.grid.cells`, and
+    `applyVideos` fills every cell up to that total straight from
+    `video_ids.concat(reserves)` — so a `/layout` screen count past the flat
+    grid's own vetted count is populated from that same unmeasured tail
+    *up front*, with no `onError` involved to catch a still and swap it out.
+    Raising `total` well past `grid.cols × rows` therefore trades some of the
+    motion filtering gotcha 16 exists for.

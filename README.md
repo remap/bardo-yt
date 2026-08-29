@@ -51,6 +51,10 @@ Two pages:
   menu: `pointer-events: none` on the iframe means the cell, not YouTube,
   receives the pointer.
 - **`/config`** — live editor. Saving pushes to the wall over a WebSocket.
+- **`/layout`** — the same wall, spread across the six real Cafe Bardo screens
+  (geometry vendored in `static/layout/screens.json`) instead of one flat
+  grid, with a config-driven per-screen video budget. Everything above still
+  applies — it shares its player engine with `/`.
 
 ## Authentication
 
@@ -261,7 +265,8 @@ uv run pytest -m live -v         # one real search; spends 100 quota units
 The browser suite exists because two bugs made the wall render completely
 blank with no console error, and neither the Python nor the node tests could
 see them — one was script-ordering, the other a Python/JS serialization gap.
-Run it after touching `player.js` or the config wire format.
+Run it after touching `wall-engine.js` (the shared player engine behind both
+`/` and `/layout`) or the config wire format.
 
 A conftest guard fails any default-suite test that reaches the live API, so
 the budget cannot be spent by accident.

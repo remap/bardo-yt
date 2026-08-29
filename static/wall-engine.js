@@ -51,7 +51,7 @@ async function tfetch(label, url, init) {
   }
 }
 
-wlog("player.js loaded");
+wlog("wall-engine.js loaded");
 
 // How long to keep asking while the container wakes.
 //
@@ -68,10 +68,10 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // fetchJsonPatiently below has to report through the status line, but the real
 // setStatus() is defined inside startWall()'s scope, further down this file --
-// this module-level function stays outside it (see the diff notes at the top
-// of startWall), so it cannot close over setStatus directly. startWall()
-// installs the real implementation here as its first act; until then this is
-// a no-op, which only matters in the window before startWall() has run.
+// this module-level function stays outside it, so it cannot close over
+// setStatus directly. startWall() installs the real implementation here as
+// its first act; until then this is a no-op, which only matters in the window
+// before startWall() has run.
 let reportStatus = () => {};
 
 /** GET a JSON endpoint, waiting out a container that is still starting. */
@@ -134,6 +134,11 @@ function defaultComputeLayout(config) {
   };
 }
 
+// The body below is deliberately NOT indented a level for being inside this
+// function. It used to be the whole of player.js at module scope; wrapping it
+// in startWall() so /layout could reuse it was meant to be a pure extraction,
+// and re-indenting every line would have turned that into a diff nobody could
+// audit line-by-line. Leave it flush left.
 export function startWall({ computeLayout = defaultComputeLayout } = {}) {
 
 const gridEl = document.getElementById("grid");
@@ -351,10 +356,11 @@ function applyCoverFit(cell) {
 
 // The IFrame API signals readiness by calling this global exactly once, when
 // www-widgetapi.js finishes loading. That is a race we lose more often than
-// not: player.js is a module, so it is deferred until after the document
-// parses, while the API script is injected during parsing and often finishes
-// first -- especially when cached. When it wins, it finds no callback
-// registered, never calls one, and the page sits blank with no error at all.
+// not: this module is deferred until after the document parses (both
+// player.js and layout-page.js load it as an ES module), while the API script
+// is injected during parsing and often finishes first -- especially when
+// cached. When it wins, it finds no callback registered, never calls one, and
+// the page sits blank with no error at all.
 //
 // So check for an already-loaded API first, and only register the callback if
 // it genuinely has not arrived yet.
@@ -759,7 +765,8 @@ async function requestNewQuery(prompt = null) {
     // The button is reachable before the first resync finishes -- and if that
     // resync failed on a waking container, config is still null. Generating
     // now would spend 100 units and then throw in applyVideos on
-    // cellCount(config.grid), which is exactly what happened on a cold start.
+    // computeLayout(config).totalCells, which is exactly what happened on a
+    // cold start.
     wlog("refusing to generate: no config yet");
     setStatus("still waiting for the server — try again in a moment", "error");
     return false;
@@ -819,8 +826,9 @@ async function resync() {
   wlog(`resync start (seq ${seqAtEntry})`);
   const fetchedConfig = await fetchJsonPatiently("GET /api/config", "/api/config");
   if (!fetchedConfig) {
-    // Nothing below can run without it -- cellCount(config.grid) is the first
-    // thing applyVideos does. Better to say so than to hang on a blank page.
+    // Nothing below can run without it -- computeLayout(config).totalCells is
+    // the first thing applyVideos does. Better to say so than to hang on a
+    // blank page.
     wlog("could not load config -- the wall cannot start");
     setStatus("could not reach the server — reload to try again", "error");
     return;
@@ -1359,7 +1367,12 @@ connectSocket({
       clearQuery();
       clearWall();
     }
-    if (needsRefetch(previous, message.config)) {
+    // Pass this page's own computeLayout so a layout-only change (total,
+    // max_per_screen, per-screen counts -- none of which touch config.grid)
+    // is recognised as structural on /layout without making / (whose
+    // computeLayout is defaultComputeLayout, totalCells === cellCount(grid))
+    // refetch on anything it did not already refetch on.
+    if (needsRefetch(previous, message.config, (config) => computeLayout(config).totalCells)) {
       wlog("config change affects the search -- refetching");
       resync();
     }
