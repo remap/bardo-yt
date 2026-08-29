@@ -139,7 +139,7 @@ function defaultComputeLayout(config) {
 // in startWall() so /layout could reuse it was meant to be a pure extraction,
 // and re-indenting every line would have turned that into a diff nobody could
 // audit line-by-line. Leave it flush left.
-export function startWall({ computeLayout = defaultComputeLayout } = {}) {
+export function startWall({ computeLayout = defaultComputeLayout, controlChannel = null } = {}) {
 
 const gridEl = document.getElementById("grid");
 const statusEl = document.getElementById("status");
@@ -537,6 +537,70 @@ function rebuild() {
   prerollCurrentSet(++generation);
 }
 
+// null until startWall({ controlChannel }) opens one -- publishSnapshot()
+// below is a no-op until then, so every call site can call it unconditionally
+// without checking whether a control page exists.
+let broadcastChannel = null;
+
+function buildSnapshot() {
+  const layout = computeLayout(config);
+  const cells = slotState.slots.map((videoId, index) => {
+    const player = players[index];
+    let currentTime = 0;
+    let playing = false;
+    try {
+      currentTime = player?.getCurrentTime?.() ?? 0;
+      playing = (player?.getPlayerState?.() ?? -1) === 1;
+    } catch {
+      // A player mid-teardown; snapshot with the defaults above.
+    }
+    return {
+      index,
+      videoId: videoId ?? null,
+      title: videoId ? (titles.get(videoId) ?? videoId) : null,
+      empty: !videoId,
+      zoom: views.get(index)?.zoom ?? 1,
+      locked: lockedIndex === index,
+      audible: isAudible(index, currentAudioTarget()),
+      playing,
+      currentTime,
+      // Percentages, same object shape buildCells() already applies to this
+      // page's own cell -- /layout-control positions its rectangle from this
+      // directly, so the two pages can never disagree about geometry.
+      rect: layout.cellRect ? layout.cellRect(index) : null,
+    };
+  });
+
+  return {
+    type: "snapshot",
+    global: {
+      status: statusEl.textContent,
+      statusState: statusEl.dataset.state ?? "",
+      audioIndicatorText: audioEl.textContent,
+      audioLocked: audioEl.dataset.locked === "true",
+      muted,
+      prerolled,
+      wantPlaying,
+      playDisabled: playButton.disabled,
+      hoverUnmuteChecked: hoverUnmuteCheckbox.checked,
+      followChecked: followCheckbox.checked,
+      newQueryVisible: !newQueryButton.hidden,
+      newQueryDisabled: newQueryButton.disabled,
+      reservesLeft: slotState.reserves.length,
+    },
+    cells,
+  };
+}
+
+function publishSnapshot() {
+  if (!broadcastChannel) return;
+  try {
+    broadcastChannel.postMessage(buildSnapshot());
+  } catch {
+    // A channel can throw if it has already been closed; nothing useful to do.
+  }
+}
+
 function refreshControls() {
   playButton.disabled = !prerolled;
   window.__wantPlaying = wantPlaying;
@@ -657,6 +721,7 @@ function finishPreroll(token) {
     refreshControls();
     setStatus(`${statusPrefix} · ready — press Play`);
   }
+  publishSnapshot();
 }
 
 function startAll() {
@@ -1376,6 +1441,7 @@ async function applyIntent(intent) {
       wlog(`applyIntent: unknown intent type ${intent.type}`);
       return;
   }
+  publishSnapshot();
 }
 
 gridEl.addEventListener(
@@ -1478,6 +1544,18 @@ gridEl.addEventListener("pointerleave", () => {
 
 refreshMuteButton();
 refreshControls();
+
+if (controlChannel) {
+  broadcastChannel = new BroadcastChannel(controlChannel);
+  broadcastChannel.addEventListener("message", (event) => {
+    applyIntent(event.data);
+  });
+  // A heartbeat, not the only source of truth: applyIntent and finishPreroll
+  // already publish on every discrete change. This just guarantees a
+  // late-joining or reconnecting control tab is never more than a second
+  // stale, without instrumenting every low-level mutation site.
+  setInterval(publishSnapshot, 1000);
+}
 
 connectSocket({
   onReconnect: resync,
