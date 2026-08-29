@@ -78,6 +78,10 @@ def main() -> None:
         async def _layout_page() -> FileResponse:
             return FileResponse(dist / "layout.html")
 
+        @app.get("/layout-control", include_in_schema=False)
+        async def _layout_control_page() -> FileResponse:
+            return FileResponse(dist / "layout-control.html")
+
         app.mount("/", StaticFiles(directory=dist, html=True), name="dist")
 
     uvicorn.run(
