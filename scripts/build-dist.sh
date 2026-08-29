@@ -16,6 +16,9 @@ mkdir -p "$dist/static"
 
 cp "$root/static/player.html" "$dist/index.html"
 cp "$root/static/config.html" "$dist/config.html"
+cp "$root/static/layout.html" "$dist/layout.html"
+mkdir -p "$dist/static/layout"
+cp "$root/static/layout/screens.json" "$dist/static/layout/screens.json"
 # *.js only: grid-logic.test.mjs is a node test and must not ship.
 cp "$root"/static/*.js "$dist/static/"
 
