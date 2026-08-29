@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>yt matrix — layout</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: flex; flex-direction: column;
+    background: #0b0b0d; color: #e8e8ea;
+    font: 14px/1.4 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  /* Enough controls now that the row must be allowed to give: nowrap on the
+     buttons, and the status text shrinks to an ellipsis rather than forcing
+     the header to grow into a column. */
+  header {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 14px; border-bottom: 1px solid #26262b; flex: none;
+    overflow: hidden;
+  }
+  button {
+    font: inherit; font-weight: 600; padding: 7px 13px; border-radius: 6px;
+    border: 1px solid #3a3a42; background: #1c1c21; color: #e8e8ea; cursor: pointer;
+    white-space: nowrap; flex: none;
+  }
+  button:hover { background: #26262d; }
+  /* min-width, not 0: this line reports the query, the cache state, the quota
+     and every error, and `flex: 1 1 auto; min-width: 0` let it shrink to zero
+     width and vanish silently once the header gained one more control. It
+     ellipsizes instead. */
+  #status { color: #8a8a94; flex: 1 1 auto; min-width: 9em;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status[data-state="error"] { color: #e0685f; }
+  #status[data-state="busy"] { color: #d8a657; }
+  #audio { color: #8a8a94; flex: 0 1 auto; max-width: 240px; overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+  #audio:empty { display: none; }
+  #audio[data-locked="true"] { color: #d8a657; }
+  button:disabled { opacity: .45; cursor: default; }
+  #follow-label {
+    display: flex; align-items: center; gap: 6px;
+    color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
+  }
+  #follow-label input, #hover-label input { cursor: pointer; }
+  #hover-label {
+    display: flex; align-items: center; gap: 6px;
+    color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
+  }
+  /* data-audible and data-zoomed carry state for the JS and the browser
+     tests. They are deliberately not styled: the wall shows video, nothing
+     painted on top of it. */
+  #prompt {
+    font: inherit; padding: 7px 11px; border-radius: 6px; min-width: 230px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+    flex: 0 1 230px;
+  }
+  #prompt:focus { outline: none; border-color: #5a5a68; }
+  #prompt:disabled { opacity: .5; }
+  #menu {
+    position: fixed; z-index: 50; min-width: 236px; padding: 5px;
+    background: #17171c; border: 1px solid #34343d; border-radius: 8px;
+    box-shadow: 0 10px 30px #000a; font-size: 13px;
+  }
+  #menu[hidden] { display: none; }
+  #menu .head {
+    padding: 6px 10px 8px; color: #6f6f7a; font-size: 11px;
+    border-bottom: 1px solid #26262d; margin-bottom: 4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #menu button {
+    display: flex; justify-content: space-between; gap: 16px; width: 100%;
+    padding: 7px 10px; border: 0; border-radius: 5px; background: none;
+    color: #e8e8ea; font: inherit; font-weight: 400; text-align: left; cursor: pointer;
+  }
+  #menu button:hover { background: #262630; }
+  #menu button .hint { color: #6f6f7a; font-size: 11px; }
+  a { color: #8a8a94; flex: none; white-space: nowrap; }
+  #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
+  /* Hidden while pre-rolling. Every cell has to play briefly to buffer, and
+     without this you watch eight videos flicker on and stop again on every
+     new query. opacity (not visibility/display) because those let the browser
+     throttle or discard the very playback we are waiting on.
+     Hiding is instant and only the reveal fades: a transition on the way out
+     leaves the outgoing set visible while the new one is already loading. */
+  #grid[data-preroll="true"] { opacity: 0; transition: none; }
+  #grid[data-preroll="false"] { opacity: 1; transition: opacity .22s ease-out; }
+  /* overflow:hidden is what performs the crop -- player.js oversizes the
+     iframe past the cell bounds and this clips it. */
+  .cell {
+    position: relative; background: #000; overflow: hidden;
+    cursor: grab; user-select: none;
+  }
+  .cell[data-dragging="true"] { cursor: grabbing; }
+  /* pointer-events:none is doing real work, not just tidying: YouTube reveals
+     the title bar, channel avatar and control overlay on mouse-over, and there
+     is no player parameter that suppresses them. If the cursor can never reach
+     the iframe, they are never summoned. Everything here is driven through the
+     JS API, so nothing needs to click the player. */
+  .cell iframe { position: absolute; border: 0; display: block; pointer-events: none; }
+  .cell[data-empty="true"]::after {
+    content: "no playable result";
+    position: absolute; inset: 0; display: grid; place-items: center;
+    color: #55555e; font-size: 12px;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <button id="play">Play</button>
+    <button id="pause">Pause</button>
+    <button id="mute">Unmute</button>
+    <button id="rewind" title="Send every cell back to the start.">Rewind</button>
+    <button id="shuffle" title="New videos from the same query. Costs no quota; a reload restores the ranked order.">
+      Shuffle
+    </button>
+    <button id="reset-view" title="Clear zoom and pan on every cell.">Reset view</button>
+    <button id="new-query" title="Invents a new query with Gemini from the box to the right, or from the standing theme if it is empty. Costs 100 quota units.">
+      Query:
+    </button>
+    <input id="prompt" type="text" spellcheck="false"
+           placeholder="optional steer — leave blank for the theme alone"
+           title="A metaprompt: Gemini turns this into a search query using the app's guidance. Press Query: to run it. Costs 100 quota units.">
+    <label id="follow-label" title="When off, a new query loads paused and waits for you.">
+      <input type="checkbox" id="follow"> follow play state
+    </label>
+    <label id="hover-label" title="Point at a cell to hear only that one.">
+      <input type="checkbox" id="hover-unmute"> hover to unmute
+    </label>
+    <span id="audio"></span>
+    <span id="status">loading…</span>
+    <a href="/">← wall</a> <a href="/config">config →</a>
+  </header>
+  <div id="grid"></div>
+  <div id="menu" hidden></div>
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script type="module" src="/static/layout-page.js"></script>
+</body>
+</html>
