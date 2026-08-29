@@ -685,6 +685,47 @@ function pauseAll() {
   }
 }
 
+function rewindAll() {
+  for (const player of livePlayers()) {
+    try {
+      player.seekTo(config.playback.start_offset, true);
+      // seekTo resumes a player that is not already paused, so a paused wall
+      // would quietly start playing. Put it back.
+      if (!wantPlaying) player.pauseVideo();
+    } catch {
+      // A player mid-teardown; skip it.
+    }
+  }
+}
+
+function toggleMute() {
+  muted = !muted;
+  refreshMuteButton();
+  // Unmuting eight players at once is only permitted off a user gesture --
+  // this click is it. Doing it any other way leaves some players silent.
+  applyMuteStateToAll();
+}
+
+function shuffleWall() {
+  const wasPlaying = wantPlaying;
+  slotState = shuffleSlots(
+    [...slotState.slots, ...slotState.reserves],
+    computeLayout(config).totalCells,
+  );
+  rebuild();
+  // Shuffling is not a new query, so it should not silently stop the wall.
+  // rebuild() clears wantPlaying via pre-roll; put it back if it was running.
+  wantPlaying = wasPlaying;
+}
+
+function resetAllViews() {
+  views.clear();
+  for (const cell of gridEl.children) {
+    delete cell.dataset.zoomed;
+    applyCoverFit(cell);
+  }
+}
+
 /**
  * Restart each video shortly before it ends.
  *
@@ -1138,26 +1179,9 @@ window.addEventListener("resize", closeMenu);
 playButton.addEventListener("click", startAll);
 pauseButton.addEventListener("click", pauseAll);
 
-rewindButton.addEventListener("click", () => {
-  for (const player of livePlayers()) {
-    try {
-      player.seekTo(config.playback.start_offset, true);
-      // seekTo resumes a player that is not already paused, so a paused wall
-      // would quietly start playing. Put it back.
-      if (!wantPlaying) player.pauseVideo();
-    } catch {
-      // A player mid-teardown; skip it.
-    }
-  }
-});
+rewindButton.addEventListener("click", rewindAll);
 
-muteButton.addEventListener("click", () => {
-  muted = !muted;
-  refreshMuteButton();
-  // Unmuting eight players at once is only permitted off a user gesture --
-  // this click is it. Doing it any other way leaves some players silent.
-  applyMuteStateToAll();
-});
+muteButton.addEventListener("click", toggleMute);
 
 // Hover to unmute: point at a cell to hear only that one. The iframe has
 // pointer-events:none, so the cell itself receives the hover -- the same CSS
@@ -1293,25 +1317,9 @@ document.addEventListener("pointercancel", endDrag);
 // there is plenty behind the wall -- and reshuffling what we already paid for
 // costs nothing. Not persisted: a reload restores the server's ranked order,
 // which is relevance, country spread and stills-to-the-back.
-shuffleButton.addEventListener("click", () => {
-  const wasPlaying = wantPlaying;
-  slotState = shuffleSlots(
-    [...slotState.slots, ...slotState.reserves],
-    computeLayout(config).totalCells,
-  );
-  rebuild();
-  // Shuffling is not a new query, so it should not silently stop the wall.
-  // rebuild() clears wantPlaying via pre-roll; put it back if it was running.
-  wantPlaying = wasPlaying;
-});
+shuffleButton.addEventListener("click", shuffleWall);
 
-resetViewButton.addEventListener("click", () => {
-  views.clear();
-  for (const cell of gridEl.children) {
-    delete cell.dataset.zoomed;
-    applyCoverFit(cell);
-  }
-});
+resetViewButton.addEventListener("click", resetAllViews);
 
 // Double-click to hold the audio on one cell. Again on the same cell turns it
 // off; on a different cell it moves there. Unlike hover, this survives the
