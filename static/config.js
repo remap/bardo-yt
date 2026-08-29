@@ -8,25 +8,32 @@ const layoutScreensEl = field("layout-screens");
 let screenIds = [];
 
 async function loadScreenIds() {
-  const response = await fetch("/static/layout/screens.json");
-  const data = await response.json();
-  screenIds = data.screens.map((screen) => screen.id);
-  layoutScreensEl.replaceChildren();
-  for (const id of screenIds) {
-    const label = document.createElement("label");
-    label.textContent = `Screen ${id}`;
-    const input = document.createElement("input");
-    input.id = `layout_screen_${id}`;
-    input.type = "text";
-    input.placeholder = "auto";
-    input.addEventListener("input", refreshQuota);
-    label.appendChild(input);
-    layoutScreensEl.appendChild(label);
+  try {
+    const response = await fetch("/static/layout/screens.json");
+    const data = await response.json();
+    screenIds = data.screens.map((screen) => screen.id);
+    layoutScreensEl.replaceChildren();
+    for (const id of screenIds) {
+      const label = document.createElement("label");
+      label.textContent = `Screen ${id}`;
+      const input = document.createElement("input");
+      input.id = `layout_screen_${id}`;
+      input.type = "text";
+      input.placeholder = "auto";
+      input.addEventListener("input", refreshQuota);
+      label.appendChild(input);
+      layoutScreensEl.appendChild(label);
+    }
+  } catch {
+    // Silently degrade: if screens.json is unavailable, screenIds stays empty
+    // and the Layout section shows only total/max_per_screen, no per-screen fields.
+    screenIds = [];
+    layoutScreensEl.replaceChildren();
   }
 }
 
 const TEXT_FIELDS = ["query", "order", "video_duration", "safe_search", "relevance_language"];
-const NUMBER_FIELDS = ["cols", "rows", "start_offset"];
+const NUMBER_FIELDS = ["cols", "rows", "start_offset", "layout_total", "layout_max_per_screen"];
 const CHECK_FIELDS = ["loop", "autoplay_on_change"];
 
 function fill(config) {
