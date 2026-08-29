@@ -1034,6 +1034,38 @@ async function copyText(text, label) {
   }
 }
 
+function togglePlayForCell(index) {
+  const player = players[index];
+  let state = -1;
+  try {
+    state = player?.getPlayerState?.() ?? -1;
+  } catch {
+    // A player mid-teardown; nothing useful to do.
+  }
+  if (state === 1) player?.pauseVideo?.();
+  else player?.playVideo?.();
+}
+
+function toggleLockedIndex(index) {
+  lockedIndex = lockedIndex === index ? null : index;
+  for (const other of gridEl.children) delete other.dataset.locked;
+  const cell = gridEl.children[index];
+  if (lockedIndex !== null && cell) cell.dataset.locked = "true";
+  applyMuteStateToAll();
+}
+
+function restartCell(index) {
+  players[index]?.seekTo?.(config.playback.start_offset, true);
+}
+
+function resetCellZoom(index) {
+  views.delete(index);
+  const cell = gridEl.children[index];
+  if (!cell) return;
+  cell.dataset.zoomed = "false";
+  applyCoverFit(cell);
+}
+
 function playerForCell(cell) {
   const index = [...gridEl.children].indexOf(cell);
   return { index, player: index >= 0 ? players[index] : null };
@@ -1081,30 +1113,21 @@ function menuItems(cell) {
     },
     {
       label: playing ? "Pause this cell" : "Play this cell",
-      run: () => (playing ? player?.pauseVideo?.() : player?.playVideo?.()),
+      run: () => togglePlayForCell(index),
     },
     {
       label: lockedIndex === index ? "Unlock audio" : "Lock audio to this cell",
       hint: "double-click",
-      run: () => {
-        lockedIndex = lockedIndex === index ? null : index;
-        for (const other of gridEl.children) delete other.dataset.locked;
-        if (lockedIndex !== null) cell.dataset.locked = "true";
-        applyMuteStateToAll();
-      },
+      run: () => toggleLockedIndex(index),
     },
     {
       label: "Restart this cell",
-      run: () => player?.seekTo?.(config.playback.start_offset, true),
+      run: () => restartCell(index),
     },
     {
       label: "Reset zoom",
       hint: `${(viewFor(cell).zoom ?? 1).toFixed(2)}×`,
-      run: () => {
-        views.delete(index);
-        cell.dataset.zoomed = "false";
-        applyCoverFit(cell);
-      },
+      run: () => resetCellZoom(index),
     },
     {
       label: "Replace with next reserve",
@@ -1327,12 +1350,7 @@ resetViewButton.addEventListener("click", resetAllViews);
 gridEl.addEventListener("dblclick", (event) => {
   const cell = event.target.closest(".cell");
   if (!cell || cell.dataset.empty === "true") return;
-  const index = [...gridEl.children].indexOf(cell);
-  lockedIndex = lockedIndex === index ? null : index;
-
-  for (const other of gridEl.children) delete other.dataset.locked;
-  if (lockedIndex !== null) cell.dataset.locked = "true";
-  applyMuteStateToAll();
+  toggleLockedIndex([...gridEl.children].indexOf(cell));
 });
 
 gridEl.addEventListener("pointerover", (event) => {
