@@ -56,4 +56,4 @@ function computeLayout(config) {
 }
 
 await loadScreens();
-startWall({ computeLayout });
+startWall({ computeLayout, controlChannel: "yt-matrix-layout-control" });

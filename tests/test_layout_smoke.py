@@ -198,7 +198,7 @@ def test_pre_roll_and_mute_work_the_same_as_the_grid_page(running_server):
         page.wait_for_function("window.__prerolled === true", timeout=40_000)
 
         assert page.evaluate("window.__players.every(p => p.isMuted())"), "should start muted"
-        page.click("#play")
-        page.click("#mute")
+        page.evaluate("document.querySelector('#play').click()")
+        page.evaluate("document.querySelector('#mute').click()")
         page.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=15_000)
         browser.close()

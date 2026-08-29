@@ -139,7 +139,7 @@ function defaultComputeLayout(config) {
 // in startWall() so /layout could reuse it was meant to be a pure extraction,
 // and re-indenting every line would have turned that into a diff nobody could
 // audit line-by-line. Leave it flush left.
-export function startWall({ computeLayout = defaultComputeLayout } = {}) {
+export function startWall({ computeLayout = defaultComputeLayout, controlChannel = null } = {}) {
 
 const gridEl = document.getElementById("grid");
 const statusEl = document.getElementById("status");
@@ -537,6 +537,80 @@ function rebuild() {
   prerollCurrentSet(++generation);
 }
 
+// null until startWall({ controlChannel }) opens one -- publishSnapshot()
+// below is a no-op until then, so every call site can call it unconditionally
+// without checking whether a control page exists.
+let broadcastChannel = null;
+
+function buildSnapshot() {
+  // The heartbeat below fires on a timer, which can beat the first resync() to
+  // the punch -- and computeLayout(config) is the first thing this does.
+  // Nothing useful to publish yet; the next tick will have it.
+  if (!config) return null;
+  const layout = computeLayout(config);
+  const cells = slotState.slots.map((videoId, index) => {
+    const player = players[index];
+    let currentTime = 0;
+    let playing = false;
+    try {
+      currentTime = player?.getCurrentTime?.() ?? 0;
+      playing = (player?.getPlayerState?.() ?? -1) === 1;
+    } catch {
+      // A player mid-teardown; snapshot with the defaults above.
+    }
+    return {
+      index,
+      videoId: videoId ?? null,
+      title: videoId ? (titles.get(videoId) ?? videoId) : null,
+      empty: !videoId,
+      zoom: views.get(index)?.zoom ?? 1,
+      locked: lockedIndex === index,
+      audible: isAudible(index, currentAudioTarget()),
+      playing,
+      currentTime,
+      // Percentages, same object shape buildCells() already applies to this
+      // page's own cell -- /layout-control positions its rectangle from this
+      // directly, so the two pages can never disagree about geometry.
+      rect: layout.cellRect ? layout.cellRect(index) : null,
+    };
+  });
+
+  return {
+    type: "snapshot",
+    global: {
+      status: statusEl.textContent,
+      statusState: statusEl.dataset.state ?? "",
+      audioIndicatorText: audioEl.textContent,
+      audioLocked: audioEl.dataset.locked === "true",
+      muted,
+      prerolled,
+      wantPlaying,
+      playDisabled: playButton.disabled,
+      hoverUnmuteChecked: hoverUnmuteCheckbox.checked,
+      followChecked: followCheckbox.checked,
+      newQueryVisible: !newQueryButton.hidden,
+      newQueryDisabled: newQueryButton.disabled,
+      reservesLeft: slotState.reserves.length,
+    },
+    cells,
+  };
+}
+
+function publishSnapshot() {
+  if (!broadcastChannel) return;
+  try {
+    const snapshot = buildSnapshot();
+    if (!snapshot) return;
+    broadcastChannel.postMessage(snapshot);
+  } catch (error) {
+    // A closed channel is the expected case, but this catch also covers
+    // anything buildSnapshot() itself threw -- and a control page silently
+    // frozen on a stale snapshot is exactly the sort of failure that costs an
+    // afternoon. Say so.
+    wlog("publishSnapshot failed", error);
+  }
+}
+
 function refreshControls() {
   playButton.disabled = !prerolled;
   window.__wantPlaying = wantPlaying;
@@ -657,6 +731,7 @@ function finishPreroll(token) {
     refreshControls();
     setStatus(`${statusPrefix} · ready — press Play`);
   }
+  publishSnapshot();
 }
 
 function startAll() {
@@ -682,6 +757,47 @@ function pauseAll() {
     } catch {
       // Nothing useful to do.
     }
+  }
+}
+
+function rewindAll() {
+  for (const player of livePlayers()) {
+    try {
+      player.seekTo(config.playback.start_offset, true);
+      // seekTo resumes a player that is not already paused, so a paused wall
+      // would quietly start playing. Put it back.
+      if (!wantPlaying) player.pauseVideo();
+    } catch {
+      // A player mid-teardown; skip it.
+    }
+  }
+}
+
+function toggleMute() {
+  muted = !muted;
+  refreshMuteButton();
+  // Unmuting eight players at once is only permitted off a user gesture --
+  // this click is it. Doing it any other way leaves some players silent.
+  applyMuteStateToAll();
+}
+
+function shuffleWall() {
+  const wasPlaying = wantPlaying;
+  slotState = shuffleSlots(
+    [...slotState.slots, ...slotState.reserves],
+    computeLayout(config).totalCells,
+  );
+  rebuild();
+  // Shuffling is not a new query, so it should not silently stop the wall.
+  // rebuild() clears wantPlaying via pre-roll; put it back if it was running.
+  wantPlaying = wasPlaying;
+}
+
+function resetAllViews() {
+  views.clear();
+  for (const cell of gridEl.children) {
+    delete cell.dataset.zoomed;
+    applyCoverFit(cell);
   }
 }
 
@@ -964,7 +1080,7 @@ newQueryButton.addEventListener("click", async () => {
   const prompt = promptInput.value.trim();
   promptInput.disabled = true;
   try {
-    await requestNewQuery(prompt || null);
+    await applyIntent({ type: "newQuery", prompt: prompt || null });
   } finally {
     promptInput.disabled = false;
   }
@@ -991,6 +1107,42 @@ async function copyText(text, label) {
   } catch {
     setStatus("clipboard blocked by the browser", "error");
   }
+}
+
+function togglePlayForCell(index) {
+  const player = players[index];
+  let state = -1;
+  try {
+    state = player?.getPlayerState?.() ?? -1;
+  } catch {
+    // A player mid-teardown; nothing useful to do.
+  }
+  if (state === 1) player?.pauseVideo?.();
+  else player?.playVideo?.();
+}
+
+function toggleLockedIndex(index) {
+  // Locking audio to a cell with no player would leave the wall silent with
+  // an indicator claiming otherwise. The local dblclick handler already
+  // refuses an empty cell; a relayed cellDblclick reaches here directly.
+  if (gridEl.children[index]?.dataset.empty === "true") return;
+  lockedIndex = lockedIndex === index ? null : index;
+  for (const other of gridEl.children) delete other.dataset.locked;
+  const cell = gridEl.children[index];
+  if (lockedIndex !== null && cell) cell.dataset.locked = "true";
+  applyMuteStateToAll();
+}
+
+function restartCell(index) {
+  players[index]?.seekTo?.(config.playback.start_offset, true);
+}
+
+function resetCellZoom(index) {
+  views.delete(index);
+  const cell = gridEl.children[index];
+  if (!cell) return;
+  cell.dataset.zoomed = "false";
+  applyCoverFit(cell);
 }
 
 function playerForCell(cell) {
@@ -1040,30 +1192,21 @@ function menuItems(cell) {
     },
     {
       label: playing ? "Pause this cell" : "Play this cell",
-      run: () => (playing ? player?.pauseVideo?.() : player?.playVideo?.()),
+      run: () => togglePlayForCell(index),
     },
     {
       label: lockedIndex === index ? "Unlock audio" : "Lock audio to this cell",
       hint: "double-click",
-      run: () => {
-        lockedIndex = lockedIndex === index ? null : index;
-        for (const other of gridEl.children) delete other.dataset.locked;
-        if (lockedIndex !== null) cell.dataset.locked = "true";
-        applyMuteStateToAll();
-      },
+      run: () => toggleLockedIndex(index),
     },
     {
       label: "Restart this cell",
-      run: () => player?.seekTo?.(config.playback.start_offset, true),
+      run: () => restartCell(index),
     },
     {
       label: "Reset zoom",
       hint: `${(viewFor(cell).zoom ?? 1).toFixed(2)}×`,
-      run: () => {
-        views.delete(index);
-        cell.dataset.zoomed = "false";
-        applyCoverFit(cell);
-      },
+      run: () => resetCellZoom(index),
     },
     {
       label: "Replace with next reserve",
@@ -1135,38 +1278,17 @@ window.addEventListener("resize", closeMenu);
 // Eight players starting at once is exactly what browsers throttle; this click
 // is the user gesture that makes them all start. It is disabled until the set
 // has pre-rolled, so there is no window where pressing it starts only some.
-playButton.addEventListener("click", startAll);
-pauseButton.addEventListener("click", pauseAll);
-
-rewindButton.addEventListener("click", () => {
-  for (const player of livePlayers()) {
-    try {
-      player.seekTo(config.playback.start_offset, true);
-      // seekTo resumes a player that is not already paused, so a paused wall
-      // would quietly start playing. Put it back.
-      if (!wantPlaying) player.pauseVideo();
-    } catch {
-      // A player mid-teardown; skip it.
-    }
-  }
-});
-
-muteButton.addEventListener("click", () => {
-  muted = !muted;
-  refreshMuteButton();
-  // Unmuting eight players at once is only permitted off a user gesture --
-  // this click is it. Doing it any other way leaves some players silent.
-  applyMuteStateToAll();
-});
+playButton.addEventListener("click", () => applyIntent({ type: "play" }));
+pauseButton.addEventListener("click", () => applyIntent({ type: "pause" }));
+rewindButton.addEventListener("click", () => applyIntent({ type: "rewind" }));
+muteButton.addEventListener("click", () => applyIntent({ type: "muteToggle" }));
 
 // Hover to unmute: point at a cell to hear only that one. The iframe has
 // pointer-events:none, so the cell itself receives the hover -- the same CSS
 // the context menu depends on.
-hoverUnmuteCheckbox.addEventListener("change", () => {
-  // Leaving the mode must not strand a cell audible or the whole wall silent.
-  setAudibleCell(null);
-  applyMuteStateToAll();
-});
+hoverUnmuteCheckbox.addEventListener("change", () =>
+  applyIntent({ type: "hoverUnmuteToggle", checked: hoverUnmuteCheckbox.checked }),
+);
 
 // Scroll to zoom, anchored on the pointer. passive:false because the page
 // must not scroll underneath -- the wall is a fixed-height layout and a
@@ -1203,41 +1325,167 @@ function flushZoom() {
   cell.dataset.zoomed = view.zoom > 1.001 ? "true" : "false";
 }
 
+function queueZoom(cell, index, width, height, deltaY, x, y) {
+  if (pendingZoom && pendingZoom.index === index) {
+    // Same cell, same frame: sum the deltas so no scrolling is lost, and
+    // track the cursor to wherever it ended up.
+    pendingZoom.deltaY += deltaY;
+    pendingZoom.x = x;
+    pendingZoom.y = y;
+    return;
+  }
+  // A different cell mid-frame: land the queued one first rather than
+  // dropping it.
+  if (pendingZoom) flushZoom();
+  pendingZoom = { cell, index, width, height, deltaY, x, y };
+  requestAnimationFrame(flushZoom);
+}
+
+// x, y arrive normalized (0..1) -- from a real local event on THIS page's own
+// cell, or relayed from /layout-control's differently-sized rectangle for
+// the same cell. Either way this converts to this page's own real pixel
+// space before reusing the exact zoom math a local wheel event already used.
+function applyCellWheel(index, deltaY, xFraction, yFraction) {
+  const cell = gridEl.children[index];
+  if (!cell || cell.dataset.empty === "true") return;
+  const bounds = cell.getBoundingClientRect();
+  queueZoom(cell, index, bounds.width, bounds.height, deltaY, xFraction * bounds.width, yFraction * bounds.height);
+}
+
+// dx, dy arrive as a fraction of the SENDER's own cell size (already an
+// incremental delta, not an absolute position) -- rescaling by this page's
+// own bounds is what makes a drag feel proportionally the same regardless of
+// how big /layout-control's rectangle happens to be.
+function applyCellPan(index, dxFraction, dyFraction) {
+  const cell = gridEl.children[index];
+  // Same guard applyCellWheel has: an empty cell has no iframe to move, and
+  // storing a view for it would survive into whatever reserve lands there.
+  if (!cell || cell.dataset.empty === "true") return;
+  const bounds = cell.getBoundingClientRect();
+  views.set(
+    index,
+    panBy(views.get(index) ?? IDENTITY_VIEW, dxFraction * bounds.width, dyFraction * bounds.height),
+  );
+  applyCoverFit(cell);
+}
+
+function applyCellMenuAction(index, action) {
+  switch (action) {
+    case "togglePlay":
+      togglePlayForCell(index);
+      break;
+    case "toggleLock":
+      toggleLockedIndex(index);
+      break;
+    case "restart":
+      restartCell(index);
+      break;
+    case "resetZoom":
+      resetCellZoom(index);
+      break;
+    case "replaceReserve":
+      handlePlayerError(index);
+      break;
+    default:
+      wlog(`applyCellMenuAction: unknown action ${action}`);
+  }
+}
+
+// Every user action reachable from the header or a cell -- a real DOM event
+// on THIS page, or one relayed from /layout-control over BroadcastChannel --
+// funnels through here. That symmetry is the whole point: a control-window
+// message and a local click must produce identical effects, so this is the
+// only place either kind is handled. publishSnapshot() at the end is a no-op
+// unless startWall was given a controlChannel, so every path can call it.
+async function applyIntent(intent) {
+  switch (intent.type) {
+    case "play":
+      startAll();
+      break;
+    case "pause":
+      pauseAll();
+      break;
+    case "muteToggle":
+      toggleMute();
+      break;
+    case "rewind":
+      rewindAll();
+      break;
+    case "shuffle":
+      shuffleWall();
+      break;
+    case "resetView":
+      resetAllViews();
+      break;
+    case "newQuery":
+      // `generating` is already set synchronously by requestNewQuery and
+      // cleared in its finally, so this is the same guard the local button's
+      // disabled state gives a local click. A relayed intent never sees that
+      // disabled state -- /layout-control's own button only learns it is
+      // disabled when the next snapshot arrives, up to a heartbeat later --
+      // so the dispatcher itself has to hold the line. Two fast clicks over
+      // the channel would otherwise be two generations at 100 units each.
+      if (generating) {
+        wlog("ignoring newQuery: one is already in flight");
+        break;
+      }
+      await requestNewQuery(intent.prompt ?? null);
+      break;
+    case "hoverUnmuteToggle":
+      hoverUnmuteCheckbox.checked = intent.checked;
+      setAudibleCell(null);
+      applyMuteStateToAll();
+      break;
+    case "followToggle":
+      followCheckbox.checked = intent.checked;
+      break;
+    case "cellHoverEnter":
+      if (hoverUnmuteCheckbox.checked) setAudibleCell(intent.index);
+      break;
+    case "cellHoverLeave":
+      if (hoverUnmuteCheckbox.checked) setAudibleCell(null);
+      break;
+    case "cellWheel":
+      applyCellWheel(intent.index, intent.deltaY, intent.x, intent.y);
+      break;
+    case "cellDragStart":
+      // Purely a cursor affordance; kept for parity with a locally-driven drag.
+      gridEl.children[intent.index]?.setAttribute("data-dragging", "true");
+      break;
+    case "cellDragMove":
+      applyCellPan(intent.index, intent.dx, intent.dy);
+      break;
+    case "cellDragEnd":
+      gridEl.children[intent.index]?.removeAttribute("data-dragging");
+      break;
+    case "cellDblclick":
+      toggleLockedIndex(intent.index);
+      break;
+    case "cellMenuAction":
+      applyCellMenuAction(intent.index, intent.action);
+      break;
+    default:
+      wlog(`applyIntent: unknown intent type ${intent.type}`);
+      return;
+  }
+  publishSnapshot();
+}
+
 gridEl.addEventListener(
   "wheel",
   (event) => {
     const cell = event.target.closest(".cell");
     if (!cell || cell.dataset.empty === "true") return;
     event.preventDefault();
-
     const index = [...gridEl.children].indexOf(cell);
     const bounds = cell.getBoundingClientRect();
-    const x = event.clientX - bounds.left;
-    const y = event.clientY - bounds.top;
-
-    if (pendingZoom && pendingZoom.index === index) {
-      // Same cell, same frame: sum the deltas so no scrolling is lost, and
-      // track the cursor to wherever it ended up.
-      pendingZoom.deltaY += event.deltaY;
-      pendingZoom.x = x;
-      pendingZoom.y = y;
-      return;
-    }
-
-    // A different cell mid-frame: land the queued one first rather than
-    // dropping it.
-    if (pendingZoom) flushZoom();
-
-    pendingZoom = {
-      cell,
+    applyIntent({
+      type: "cellWheel",
       index,
-      width: bounds.width,
-      height: bounds.height,
       deltaY: event.deltaY,
-      x,
-      y,
-    };
-    requestAnimationFrame(flushZoom);
+      x: bounds.width ? (event.clientX - bounds.left) / bounds.width : 0,
+      y: bounds.height ? (event.clientY - bounds.top) / bounds.height : 0,
+    });
   },
   { passive: false },
 );
@@ -1250,28 +1498,29 @@ gridEl.addEventListener("pointerdown", (event) => {
   if (event.button !== 0) return; // left button only; right opens the menu
   const cell = event.target.closest(".cell");
   if (!cell || cell.dataset.empty === "true") return;
-  drag = {
-    cell,
-    index: [...gridEl.children].indexOf(cell),
-    x: event.clientX,
-    y: event.clientY,
-  };
-  cell.dataset.dragging = "true";
+  const index = [...gridEl.children].indexOf(cell);
+  drag = { cell, index, x: event.clientX, y: event.clientY };
   try {
     cell.setPointerCapture(event.pointerId);
   } catch {
     // Capture is a convenience; the document-level pointerup still ends it.
   }
+  applyIntent({ type: "cellDragStart", index });
 });
 
 gridEl.addEventListener("pointermove", (event) => {
   if (!drag) return;
   const dx = event.clientX - drag.x;
   const dy = event.clientY - drag.y;
+  const bounds = drag.cell.getBoundingClientRect();
   drag.x = event.clientX;
   drag.y = event.clientY;
-  views.set(drag.index, panBy(views.get(drag.index) ?? IDENTITY_VIEW, dx, dy));
-  applyCoverFit(drag.cell);
+  applyIntent({
+    type: "cellDragMove",
+    index: drag.index,
+    dx: bounds.width ? dx / bounds.width : 0,
+    dy: bounds.height ? dy / bounds.height : 0,
+  });
 });
 
 function endDrag(event) {
@@ -1281,7 +1530,7 @@ function endDrag(event) {
   } catch {
     // Already released, or never captured.
   }
-  delete drag.cell.dataset.dragging;
+  applyIntent({ type: "cellDragEnd", index: drag.index });
   drag = null;
 }
 
@@ -1293,25 +1542,9 @@ document.addEventListener("pointercancel", endDrag);
 // there is plenty behind the wall -- and reshuffling what we already paid for
 // costs nothing. Not persisted: a reload restores the server's ranked order,
 // which is relevance, country spread and stills-to-the-back.
-shuffleButton.addEventListener("click", () => {
-  const wasPlaying = wantPlaying;
-  slotState = shuffleSlots(
-    [...slotState.slots, ...slotState.reserves],
-    computeLayout(config).totalCells,
-  );
-  rebuild();
-  // Shuffling is not a new query, so it should not silently stop the wall.
-  // rebuild() clears wantPlaying via pre-roll; put it back if it was running.
-  wantPlaying = wasPlaying;
-});
+shuffleButton.addEventListener("click", () => applyIntent({ type: "shuffle" }));
 
-resetViewButton.addEventListener("click", () => {
-  views.clear();
-  for (const cell of gridEl.children) {
-    delete cell.dataset.zoomed;
-    applyCoverFit(cell);
-  }
-});
+resetViewButton.addEventListener("click", () => applyIntent({ type: "resetView" }));
 
 // Double-click to hold the audio on one cell. Again on the same cell turns it
 // off; on a different cell it moves there. Unlike hover, this survives the
@@ -1319,30 +1552,37 @@ resetViewButton.addEventListener("click", () => {
 gridEl.addEventListener("dblclick", (event) => {
   const cell = event.target.closest(".cell");
   if (!cell || cell.dataset.empty === "true") return;
-  const index = [...gridEl.children].indexOf(cell);
-  lockedIndex = lockedIndex === index ? null : index;
-
-  for (const other of gridEl.children) delete other.dataset.locked;
-  if (lockedIndex !== null) cell.dataset.locked = "true";
-  applyMuteStateToAll();
+  applyIntent({ type: "cellDblclick", index: [...gridEl.children].indexOf(cell) });
 });
 
 gridEl.addEventListener("pointerover", (event) => {
   if (!hoverUnmuteCheckbox.checked) return;
   const cell = event.target.closest(".cell");
   if (!cell || cell.dataset.empty === "true") return;
-  setAudibleCell([...gridEl.children].indexOf(cell));
+  applyIntent({ type: "cellHoverEnter", index: [...gridEl.children].indexOf(cell) });
 });
 
 // pointerleave on the grid, not per cell: moving between adjacent cells would
 // otherwise blip the audio off and on again between them.
 gridEl.addEventListener("pointerleave", () => {
   if (!hoverUnmuteCheckbox.checked) return;
-  setAudibleCell(null);
+  applyIntent({ type: "cellHoverLeave" });
 });
 
 refreshMuteButton();
 refreshControls();
+
+if (controlChannel) {
+  broadcastChannel = new BroadcastChannel(controlChannel);
+  broadcastChannel.addEventListener("message", (event) => {
+    applyIntent(event.data);
+  });
+  // A heartbeat, not the only source of truth: applyIntent and finishPreroll
+  // already publish on every discrete change. This just guarantees a
+  // late-joining or reconnecting control tab is never more than a second
+  // stale, without instrumenting every low-level mutation site.
+  setInterval(publishSnapshot, 1000);
+}
 
 connectSocket({
   onReconnect: resync,
