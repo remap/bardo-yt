@@ -563,3 +563,34 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     test to "make it match the others": the absence of the flag is what it
     tests. The menu test above it does use the flag, for the unrelated reason
     that it needs playback started from the page's own script.
+
+42. **`POST /api/intent` is a second front door into `applyIntent()`, for a
+    controller that has no browser to share a `BroadcastChannel` with.**
+    `/layout-control` relays intents to `/layout` only because both are pages
+    in the *same* browser profile (gotcha 40's whole premise). An external
+    show-control/OSC router (e.g. `chasa`, in `../bardo-tools/chasa`) is a
+    separate process with no browser at all, so it goes in over HTTP instead:
+    `POST /api/intent` validates `type` against `WALL_WIDE_INTENT_TYPES`
+    (`ytmatrix/server.py`) and broadcasts `{"type": "intent", "intent":
+    payload}` over the same `/ws` connection `put_config` already uses for
+    config pushes. `wall-engine.js`'s socket `onMessage` calls `applyIntent()`
+    on it directly — one new branch, no new dispatch logic.
+
+    Deliberately restricted to the wall-wide intents (`play`, `pause`,
+    `muteToggle`, `rewind`, `shuffle`, `resetView`, `newQuery`,
+    `hoverUnmuteToggle`, `followToggle`) — **not** the cell-indexed ones
+    (`cellWheel`, `cellDblclick`, `cellMenuAction`, `cellHoverEnter/Leave`,
+    `cellDragStart/Move/End`). Those carry an index tied to whichever page's
+    grid is open, and this broadcasts to *every* connected tab, `/` and
+    `/layout` alike — not just one wall. `newQuery` carries gotcha 29/2's own
+    quota-multiplication risk for the same reason: every open tab that
+    receives it independently spends its own 100-unit search. One wall/tab
+    open at a time when driving this from an external cue source is an
+    operational rule, not something the endpoint enforces.
+
+    A Python REST client (chasa's `httpx`-based `rest` action) does not trust
+    this server's local mkcert certificate by default — `httpx` uses
+    `certifi`, not the macOS keychain, so it rejects the connection even
+    though a browser or `curl` accepts it. Confirmed live: setting
+    `SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem` in the caller's environment
+    fixes it with no code change on either side.

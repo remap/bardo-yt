@@ -30,6 +30,23 @@ from ytmatrix.ws import ConnectionManager
 
 logger = logging.getLogger(__name__)
 
+# /api/intent's allowlist. Deliberately excludes every cell-indexed intent
+# (cellWheel, cellDblclick, cellMenuAction, cellHoverEnter/Leave,
+# cellDragStart/Move/End) -- those carry a cell index tied to whichever
+# page's grid is open, and this endpoint broadcasts to every connected tab,
+# not just one wall. See post_intent's docstring.
+WALL_WIDE_INTENT_TYPES = {
+    "play",
+    "pause",
+    "muteToggle",
+    "rewind",
+    "shuffle",
+    "resetView",
+    "newQuery",
+    "hoverUnmuteToggle",
+    "followToggle",
+}
+
 
 class BudgetExceededError(RuntimeError):
     """The self-imposed daily ceiling would be crossed by another search."""
@@ -793,6 +810,40 @@ def create_app(
             region_code=region_of(request),
             extra_timings={"gemini": gemini_secs},
         )
+
+    @app.post("/api/intent")
+    async def post_intent(payload: dict) -> dict:
+        """Relay a wall-wide control intent to every connected browser tab.
+
+        For an external controller (a show-control/OSC router, e.g. chasa)
+        that cannot join a browser's own BroadcastChannel the way
+        /layout-control does -- this is a second front door into the same
+        applyIntent() dispatcher in wall-engine.js, over the /ws connection
+        every wall already holds open for config pushes.
+
+        Deliberately restricted to WALL_WIDE_INTENT_TYPES: a cell-indexed
+        intent (cellWheel, cellDblclick, cellMenuAction, ...) carries an
+        index tied to whichever page's grid is open, and this broadcasts to
+        every connected tab -- / and /layout alike -- not just one wall.
+
+        newQuery carries the same quota-multiplication risk documented for
+        /layout-control's own Query button (gotcha 29/2): every open tab
+        that receives this independently calls requestNewQuery, each one a
+        100-unit search. One wall/tab open at a time when driving this from
+        an external cue source is an operational rule, not something this
+        endpoint enforces.
+        """
+        intent_type = payload.get("type")
+        if intent_type not in WALL_WIDE_INTENT_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"unknown intent type {intent_type!r}; must be one of "
+                    f"{sorted(WALL_WIDE_INTENT_TYPES)}"
+                ),
+            )
+        await manager.broadcast({"type": "intent", "intent": payload})
+        return {"status": "ok"}
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:

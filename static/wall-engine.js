@@ -1586,13 +1586,19 @@ if (controlChannel) {
 
 connectSocket({
   onReconnect: resync,
-  // Config is the only thing broadcast. Nothing pushes a video set any more:
-  // the server does not know what query any given browser is watching, so a
-  // wall only ever changes its own videos -- on its own resync, or off its own
-  // New query. Deciding whether a config change means this browser has to
-  // refetch is therefore the client's job, done right here.
+  // Config and relayed control intents (POST /api/intent, e.g. from an
+  // external OSC/show-control router) are the only things broadcast. Nothing
+  // pushes a video set any more: the server does not know what query any
+  // given browser is watching, so a wall only ever changes its own videos --
+  // on its own resync, or off its own New query. Deciding whether a config
+  // change means this browser has to refetch is therefore the client's job,
+  // done right here.
   onMessage: (message) => {
     wlog(`socket message type=${message.type}`);
+    if (message.type === "intent") {
+      applyIntent(message.intent);
+      return;
+    }
     if (message.type !== "config") return;
     const previous = config;
     const change = classifyConfigChange(previous, message.config);

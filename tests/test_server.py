@@ -209,6 +209,40 @@ def test_a_cosmetic_change_broadcasts_config_only(app_env):
     assert first["config"]["playback"]["start_offset"] == 45
 
 
+def test_a_wall_wide_intent_is_broadcast_to_every_connection(app_env):
+    app, _, _ = app_env
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        response = client.post("/api/intent", json={"type": "muteToggle"})
+        assert response.status_code == 200
+        message = json.loads(ws.receive_text())
+    assert message == {"type": "intent", "intent": {"type": "muteToggle"}}
+
+
+def test_an_intent_with_extra_fields_is_relayed_verbatim(app_env):
+    """hoverUnmuteToggle/followToggle carry a `checked` flag; newQuery carries
+    an optional `prompt`. The endpoint does not know or care about a given
+    type's extra fields -- it relays whatever the caller sent, and the
+    client-side applyIntent() dispatcher is what interprets them."""
+    app, _, _ = app_env
+    with TestClient(app) as client, client.websocket_connect("/ws") as ws:
+        client.post("/api/intent", json={"type": "hoverUnmuteToggle", "checked": True})
+        message = json.loads(ws.receive_text())
+    assert message == {"type": "intent", "intent": {"type": "hoverUnmuteToggle", "checked": True}}
+
+
+def test_an_unknown_intent_type_is_rejected_with_422(app_env):
+    app, _, _ = app_env
+    with TestClient(app) as client:
+        response = client.post("/api/intent", json={"type": "cellMenuAction", "index": 0})
+        assert response.status_code == 422
+
+
+def test_a_missing_intent_type_is_rejected_with_422(app_env):
+    app, _, _ = app_env
+    with TestClient(app) as client:
+        assert client.post("/api/intent", json={}).status_code == 422
+
+
 def test_quota_exhaustion_falls_back_to_stale_cache(app_env, monkeypatch):
     app, _, store = app_env
     ids = seed_cache(store)

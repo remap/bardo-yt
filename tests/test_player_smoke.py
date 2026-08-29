@@ -248,6 +248,39 @@ def test_pause_stops_every_player(running_server):
         browser.close()
 
 
+def test_a_posted_intent_reaches_the_wall_over_websocket(running_server):
+    """POST /api/intent is the second front door into applyIntent() -- for a
+    controller with no browser to share a BroadcastChannel with (e.g. chasa,
+    an OSC router). This proves the whole relay: HTTP POST -> server
+    broadcast -> this page's own /ws connection -> applyIntent() -> a real
+    effect on the players, with no button ever clicked.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        page = browser.new_context(ignore_https_errors=True).new_page()
+        page.goto(running_server, wait_until="load")
+        page.wait_for_function(
+            "window.__players?.every(p => typeof p?.pauseVideo === 'function')", timeout=25_000
+        )
+        page.wait_for_function("window.__prerolled === true", timeout=40_000)
+        page.evaluate("""
+            window.__pauseCalls = 0;
+            for (const player of window.__players) {
+                const original = player.pauseVideo.bind(player);
+                player.pauseVideo = () => { window.__pauseCalls += 1; return original(); };
+            }
+        """)
+        page.click("#play")
+
+        response = httpx.post(
+            f"{running_server}api/intent", json={"type": "pause"}, verify=False, timeout=5.0
+        )
+        assert response.status_code == 200
+
+        page.wait_for_function("window.__pauseCalls >= 8", timeout=15_000)
+        browser.close()
+
+
 def test_a_new_set_stays_paused_until_pre_rolled(running_server):
     """Nothing starts until every cell has buffered, and not even then."""
     with sync_playwright() as p:
