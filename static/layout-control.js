@@ -43,7 +43,19 @@ function setLocalStatus(text, state = "") {
   setStatus(text, state);
 }
 
-setStatus("waiting for /layout to connect…", "busy");
+// BroadcastChannel only bridges tabs/windows within the SAME browser process
+// and profile -- it cannot reach a /layout running in a different browser, a
+// different profile, or (the production case) the broadcaster's own headed-
+// but-off-screen Chrome instance. Say so loudly here, since the only other
+// symptom is this page sitting on "waiting" forever with nothing to click.
+console.log(
+  `[layout-control] connecting on BroadcastChannel("${CHANNEL_NAME}"). ` +
+    "This only reaches a /layout tab open in this SAME browser process/profile " +
+    "-- not a different browser, a different profile, or the NDI broadcaster's " +
+    "own off-screen Chrome instance, which is a separate process even if it is " +
+    "the same browser application.",
+);
+setStatus("waiting for /layout to connect… (must be open in this same browser)", "busy");
 
 // The last snapshot's cells, kept only so the context menu can be built
 // without a round trip -- every mutating action still goes back over the
@@ -94,7 +106,10 @@ function renderFromSnapshot(snapshot) {
 
   clearTimeout(staleTimer);
   staleTimer = setTimeout(() => {
-    setStatus("no update from /layout in a while — is it still open?", "error");
+    setStatus(
+      "no update from /layout in a while — is it open in this same browser?",
+      "error",
+    );
   }, STALE_AFTER_MS);
 }
 
