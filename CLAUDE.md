@@ -22,7 +22,7 @@ cp .env.example .env                    # YOUTUBE_API_KEY
 ./run.sh                                # https://localhost:8444/
 uv run pytest tests/ -v                 # default suite, never hits the network
 node --test 'static/*.test.mjs'         # pure frontend logic
-uv run pytest tests/test_player_smoke.py -m browser -v   # real Chromium; no quota
+uv run pytest tests/ -m browser -v      # real Chromium, all three suites; no quota
 uv run pytest -m live -v                # one real search; spends 100 quota units
 uv run ruff check . && uv run ruff format .
 ```
@@ -64,13 +64,15 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 | `static/grid-logic.js` | Pure slot/reserve bookkeeping + config-change classification. Node-testable. |
 | `static/wallstate.js` | What *this browser* is watching: current query + history in `localStorage`. Every access is defensive. |
 | `static/socket.js` | WS connect with backoff; re-syncs on every (re)connect. |
-| `static/wall-engine.js` | The actual player/DOM/YouTube-API engine (extracted from what used to be `player.js`): builds cells, pre-rolls, mute/audio targeting, zoom/pan, the context menu, the WS-driven config reconciliation. Exports `startWall({computeLayout})`; shared verbatim by `/` and `/layout`. |
+| `static/wall-engine.js` | The actual player/DOM/YouTube-API engine (extracted from what used to be `player.js`): builds cells, pre-rolls, mute/audio targeting, zoom/pan, the context menu, the WS-driven config reconciliation. Exports `startWall({computeLayout, controlChannel})`; shared verbatim by `/` and `/layout`. Every interaction — a local DOM event or one relayed from `/layout-control` — funnels through the one `applyIntent()` dispatcher, and with `controlChannel` set it publishes a state snapshot over `BroadcastChannel` after each intent and on a 1s heartbeat. Both are opt-in: `/` passes no channel and behaves exactly as before. |
 | `static/player.js` | Bootstraps the `/` grid page via `wall-engine.js`'s `startWall()`. Two lines. |
 | `static/layout-fit.js` | Pure per-screen allocation/fit math for `/layout` — how a total video budget splits across the six real screens and how each screen's cells tile to approximate 16:9. No DOM, no fetch; node-tested like `grid-logic.js`. |
 | `static/layout-page.js` | Bootstraps `/layout`: loads `static/layout/screens.json`, builds a screens-based `computeLayout` from `layout-fit.js`'s `resolveLayout`, and calls `wall-engine.js`'s `startWall({computeLayout})`. |
 | `static/layout/screens.json` | Vendored, hand-copied snapshot of `../layout-driver/config/screens.yaml`'s geometry (canvas size, module size, per-screen grid/offset). No live link — see gotcha 39. |
+| `static/layout-control.html` | The operator's window: the same header markup `/layout` now hides, plus a grid of plain rectangles — one per cell, no iframes. Loads no YouTube API at all. |
+| `static/layout-control.js` | Drives that page. Relays every interaction to `/layout` as an intent over the `yt-matrix-layout-control` `BroadcastChannel`, and renders purely from the snapshots coming back — it fetches nothing and holds no truth of its own (gotcha 40). |
 | `static/config.js` | The live editor and its quota-cost indicator, including the Layout section (total/max_per_screen/per-screen overrides). |
-| `scripts/build-dist.sh` | Assembles `dist/`: `player.html` → `index.html`, `config.html`, `layout.html`, `static/*.js`, `static/layout/screens.json`. Not the test `.mjs` files. |
+| `scripts/build-dist.sh` | Assembles `dist/`: `player.html` → `index.html`, `config.html`, `layout.html`, `layout-control.html`, `static/*.js`, `static/layout/screens.json`. Not the test `.mjs` files. |
 | `tests/conftest.py` | Autouse guard: fails any default-suite test that reaches the live API. |
 
 ## Critical gotchas
@@ -92,6 +94,18 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
    reloads and restarts are free. Do not add generation to page load, a timer,
    or `resync()` — `resync()` also runs on every WebSocket reconnect, which is
    a network hiccup, not an intent.
+
+   **There is now a third trigger: a `newQuery` intent over the
+   `BroadcastChannel`**, sent by `/layout-control`'s own Query: button. It
+   reaches the same `requestNewQuery()` and spends the same 100 units. Two
+   things follow. The `generating` guard that stops a local double-click lives
+   in the button's `disabled` state, which a relayed click never sees — so
+   `applyIntent`'s `case "newQuery"` checks `generating` itself, and removing
+   that check restores a real double-spend. And `BroadcastChannel` is a genuine
+   broadcast, not a channel to one peer: **two open `/layout` tabs both act on
+   one control-page click**, which is two generations at 100 units each. One
+   broadcast page at a time is an operational rule, not something the code
+   enforces.
 
    **The budget counter is an estimate, not a reading.** Google exposes no
    remaining-quota field on the YouTube Data API, and an API key cannot reach
@@ -282,11 +296,18 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 14. **Browser bugs need a browser test.** #12 and #13 were both invisible to
     the Python suite and the node tests — one is script-ordering, the other a
     serialization gap between two languages. `tests/test_player_smoke.py`
-    (marked `browser`, covers `/`) and `tests/test_layout_smoke.py` (same
-    marker, covers `/layout`) are the only things that catch either. Run both
-    after any change to `wall-engine.js` — it drives both pages — and the
-    layout one after `layout-fit.js` or `layout-page.js` too. Run either after
-    a change to the config wire format.
+    (marked `browser`, covers `/`), `tests/test_layout_smoke.py` (same marker,
+    covers `/layout`) and `tests/test_layout_control_smoke.py` (same marker,
+    covers `/layout` and `/layout-control` together, two pages in one
+    `BrowserContext`) are the only things that catch either. Run **all three**
+    after any change to `wall-engine.js` — it drives all of it — the layout one
+    after `layout-fit.js` or `layout-page.js` too, and the control one after
+    `layout-control.js` or the snapshot/intent shapes. Run any of them after a
+    change to the config wire format.
+
+    The control suite needs two pages in one context for a reason of its own:
+    `BroadcastChannel` connects tabs in the same browser profile and nothing
+    else, so a single-page test could not observe the feature at all.
 
     **The browser never loads `static/` — it loads `dist/`,** which
     `scripts/build-dist.sh` assembles by copying. Both the Worker's asset
@@ -481,3 +502,64 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     *up front*, with no `onError` involved to catch a still and swap it out.
     Raising `total` well past `grid.cols × rows` therefore trades some of the
     motion filtering gotcha 16 exists for.
+
+40. **`/layout`'s chrome is `display: none`, and it must stay in the DOM.**
+    The NDI broadcaster captures that window, so the header and the context
+    menu may never paint — but `startWall()` opens with a dozen
+    `getElementById` lookups (`play`, `pause`, `mute`, `new-query`, `prompt`,
+    `follow`, `hover-unmute`, `status`, `audio`, `menu`, …) and every one of
+    them has to keep succeeding, because `/layout-control` drives those exact
+    elements remotely: an intent arrives, `applyIntent` runs the same code a
+    local click would, and the snapshot published afterwards is read straight
+    off `statusEl.textContent`, `muteButton.disabled` and friends. Delete the
+    markup instead of hiding it and those lookups return `null`, the engine
+    throws or silently no-ops partway through startup, and the wall renders
+    blank **with no console error** — the same class of invisible failure as
+    gotchas 12 and 13, and invisible to the Python and node suites for the same
+    reason (gotcha 14). Hiding is a CSS-only change on purpose; there is no
+    `/layout`-shaped branch anywhere in `wall-engine.js`.
+
+    `#menu` is hidden alongside `header` for the same reason and by the same
+    rule. `contextmenu`'s `preventDefault()` only suppresses the *browser's*
+    menu; the app's own would still paint over the video and go out on the
+    feed.
+
+    The direction of trust runs one way: `/layout` owns every piece of state
+    and `/layout-control` renders whatever the snapshot says. The control page
+    fetches nothing — no `/api/config`, no `/api/videos` — so there is no
+    second copy of the truth to drift. Giving it its own fetch to "make it
+    load faster" reintroduces exactly that.
+
+41. **A control-page gesture still starts and unmutes `/layout`, and this was
+    measured rather than assumed.** The worry is reasonable: Chrome's autoplay
+    policy gates audible playback on user activation, `BroadcastChannel`
+    confers no activation on the receiving document, and after `/layout`'s
+    header was hidden the buttons a human presses moved to a different
+    document entirely — so it looked like the wall might never be able to make
+    a sound again.
+
+    It works. Probed against a real server with Playwright Chromium launched
+    **without** `--autoplay-policy=no-user-gesture-required`, headless and
+    headed, both identical: after pre-roll all eight players sat at state 2
+    (paused, muted); a real click on `/layout-control`'s Play took all 8 to
+    state 1; a click on its Unmute took all 8 to `isMuted() === false` **and
+    left all 8 at state 1**; and with hover-to-unmute on, hovering cell 0 gave
+    `muted=[false, true × 7]` with every player still playing.
+
+    The nuance that makes it safe: the policy gates *starting new audible
+    playback*, not clearing the mute flag on media that is already running.
+    `prerollCurrentSet()` (gotcha 18) starts every player muted, which needs no
+    gesture and is why it is written that way — so by the time any unmute is
+    relayed, the media element is already playing and past the gate. Gotcha 5's
+    "unmuting is only permitted off a user gesture" is about *starting* unmuted,
+    and remains true.
+
+    `test_the_control_page_reflects_mute_state_from_the_broadcast_page`, in
+    `tests/test_layout_control_smoke.py`, is the standing proof: it launches with no
+    autoplay flag, plays and unmutes entirely from the control page, and
+    asserts the players are unmuted **and still at state 1**. That last
+    assertion is the point — a browser refusing the unmute could pause the
+    media instead of reporting muted. Do not add `--autoplay-policy` to that
+    test to "make it match the others": the absence of the flag is what it
+    tests. The menu test above it does use the flag, for the unrelated reason
+    that it needs playback started from the page's own script.

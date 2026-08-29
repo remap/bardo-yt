@@ -178,8 +178,11 @@ def test_a_menu_action_on_the_control_page_pauses_the_real_player(running_server
         broadcast.goto(f"{running_server}/layout", wait_until="load")
         broadcast.wait_for_function("window.__prerolled === true", timeout=40_000)
         broadcast.evaluate("window.__players.forEach(p => p && p.playVideo())")
+        # Specifically cell 0, which is the one the menu action below targets.
+        # "some player is playing" would pass with cell 0 never having started,
+        # and then the assertion at the end would be vacuously true.
         broadcast.wait_for_function(
-            "window.__players.some(p => p && p.getPlayerState() === 1)", timeout=10_000
+            "window.__players[0] && window.__players[0].getPlayerState() === 1", timeout=10_000
         )
 
         control.goto(f"{running_server}/layout-control", wait_until="load")
@@ -196,6 +199,15 @@ def test_a_menu_action_on_the_control_page_pauses_the_real_player(running_server
 
 
 def test_the_control_page_reflects_mute_state_from_the_broadcast_page(running_server):
+    """Play and unmute both survive the gesture moving to another document.
+
+    Launched with NO `--autoplay-policy=no-user-gesture-required`, unlike the
+    menu test above -- that is the point. The buttons an operator actually
+    presses now live on /layout-control, and BroadcastChannel confers no user
+    activation on the receiving document, so /layout starts and unmutes eight
+    players having never been clicked. This is the test that says that works;
+    see CLAUDE.md gotcha 41 for why it is allowed to.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch()
         context = browser.new_context(ignore_https_errors=True)
@@ -206,12 +218,28 @@ def test_the_control_page_reflects_mute_state_from_the_broadcast_page(running_se
         broadcast.wait_for_function("window.__prerolled === true", timeout=40_000)
 
         control.goto(f"{running_server}/layout-control", wait_until="load")
+        # The mute button already reads "Unmute" in the page's static HTML, so
+        # waiting on its text proves nothing. The status line starting out as
+        # this page's own placeholder and then changing IS proof a snapshot
+        # arrived -- only renderFromSnapshot ever replaces it.
         control.wait_for_function(
-            "document.getElementById('mute').textContent.trim() === 'Unmute'", timeout=10_000
+            "document.getElementById('status').textContent !== 'waiting for /layout to connect…'",
+            timeout=10_000,
+        )
+
+        control.click("#play")
+        broadcast.wait_for_function(
+            "window.__players.every(p => p && p.getPlayerState() === 1)", timeout=20_000
         )
 
         control.click("#mute")
         broadcast.wait_for_function("window.__players.every(p => !p.isMuted())", timeout=10_000)
+        # Still playing, specifically. A browser that refused the unmute would
+        # not necessarily report muted -- it could pause the media instead, and
+        # a wall that goes silent-and-frozen is the failure worth naming.
+        broadcast.wait_for_function(
+            "window.__players.every(p => p && p.getPlayerState() === 1)", timeout=10_000
+        )
         control.wait_for_function(
             "document.getElementById('mute').textContent.trim() === 'Mute'", timeout=10_000
         )

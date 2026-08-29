@@ -48,9 +48,6 @@
     display: flex; align-items: center; gap: 6px;
     color: #8a8a94; user-select: none; cursor: pointer; white-space: nowrap;
   }
-  /* data-audible and data-zoomed carry state for the JS and the browser
-     tests. They are deliberately not styled: the wall shows video, nothing
-     painted on top of it. */
   #prompt {
     font: inherit; padding: 7px 11px; border-radius: 6px; min-width: 230px;
     border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
@@ -77,41 +74,18 @@
   #menu button:hover { background: #262630; }
   #menu button .hint { color: #6f6f7a; font-size: 11px; }
   a { color: #8a8a94; flex: none; white-space: nowrap; }
-  #grid { flex: 1; display: grid; gap: 2px; padding: 2px; min-height: 0; }
-  /* Hidden while pre-rolling. Every cell has to play briefly to buffer, and
-     without this you watch eight videos flicker on and stop again on every
-     new query. opacity (not visibility/display) because those let the browser
-     throttle or discard the very playback we are waiting on.
-     Hiding is instant and only the reveal fades: a transition on the way out
-     leaves the outgoing set visible while the new one is already loading. */
-  #grid[data-preroll="true"] { opacity: 0; transition: none; }
-  #grid[data-preroll="false"] { opacity: 1; transition: opacity .22s ease-out; }
-  /* overflow:hidden is what performs the crop -- player.js oversizes the
-     iframe past the cell bounds and this clips it. */
-  .cell {
-    position: relative; background: #000; overflow: hidden;
-    cursor: grab; user-select: none;
-  }
-  .cell[data-dragging="true"] { cursor: grabbing; }
-  /* pointer-events:none is doing real work, not just tidying: YouTube reveals
-     the title bar, channel avatar and control overlay on mouse-over, and there
-     is no player parameter that suppresses them. If the cursor can never reach
-     the iframe, they are never summoned. Everything here is driven through the
-     JS API, so nothing needs to click the player. */
-  .cell iframe { position: absolute; border: 0; display: block; pointer-events: none; }
-  .cell[data-empty="true"]::after {
-    content: "no playable result";
-    position: absolute; inset: 0; display: grid; place-items: center;
-    color: #55555e; font-size: 12px;
-  }
-  /* .cell here is a plain rectangle, not a player mount: no iframe, no
-     pointer-events trick needed (there is nothing to protect the cursor
-     from) -- just a label and a state-driven outline so an operator can see
-     at a glance which cell is currently audible or locked. */
+  /* This page has no iframes and no pre-roll: it draws one plain rectangle
+     per cell, absolutely positioned from the `rect` the snapshot carries, so
+     it and /layout can never disagree about geometry. Nothing here needs
+     player.html's cover-fit crop, its pointer-events:none guard against
+     YouTube's hover chrome, or its data-preroll opacity gate -- and unlike
+     /layout, data-audible and data-locked ARE painted here, because seeing at
+     a glance which cell is currently making the sound is the whole reason an
+     operator has this window open. */
   #grid { flex: 1; position: relative; min-height: 0; }
   .cell {
     position: absolute; background: #000; overflow: hidden;
-    border: 1px solid #26262b; cursor: grab;
+    border: 1px solid #26262b; cursor: grab; user-select: none;
   }
   .cell[data-dragging="true"] { cursor: grabbing; }
   .cell[data-audible="true"] { outline: 2px solid #5fb87d; outline-offset: -2px; }

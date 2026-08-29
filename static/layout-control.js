@@ -24,9 +24,23 @@ function send(intent) {
   channel.postMessage(intent);
 }
 
+// How long a message this page wrote itself ("copied URL", "clipboard
+// blocked") is protected from the next snapshot. /layout's heartbeat arrives
+// every second, so without this window a copy confirmation can be painted over
+// before it has been read -- and it is the only feedback the action gives.
+const LOCAL_STATUS_HOLD_MS = 1500;
+
+let localStatusAt = 0;
+
 function setStatus(text, state = "") {
   statusEl.textContent = text;
   statusEl.dataset.state = state;
+}
+
+// Status this page owns, rather than /layout's own line relayed through.
+function setLocalStatus(text, state = "") {
+  localStatusAt = Date.now();
+  setStatus(text, state);
 }
 
 setStatus("waiting for /layout to connect…", "busy");
@@ -35,12 +49,16 @@ setStatus("waiting for /layout to connect…", "busy");
 // without a round trip -- every mutating action still goes back over the
 // channel as an intent.
 let latestCells = [];
+// The last snapshot's `global` block, for the same reason: the reserve count
+// the menu reports lives there.
+let latestGlobal = {};
 let staleTimer = null;
 
 function renderFromSnapshot(snapshot) {
   latestCells = snapshot.cells;
+  latestGlobal = snapshot.global;
   const g = snapshot.global;
-  setStatus(g.status, g.statusState);
+  if (Date.now() - localStatusAt >= LOCAL_STATUS_HOLD_MS) setStatus(g.status, g.statusState);
   audioEl.textContent = g.audioIndicatorText;
   audioEl.dataset.locked = String(g.audioLocked);
   muteButton.textContent = g.muted ? "Unmute" : "Mute";
@@ -103,6 +121,11 @@ promptInput.addEventListener("keydown", (event) => {
 });
 newQueryButton.addEventListener("click", () => {
   const prompt = promptInput.value.trim();
+  // Disable optimistically. /layout's dispatcher is the real guard against a
+  // double 100-unit spend, but its answer only arrives with the next snapshot
+  // -- up to a heartbeat away -- and a button that stays live for a second
+  // after a click invites the second click.
+  newQueryButton.disabled = true;
   send({ type: "newQuery", prompt: prompt || null });
 });
 
@@ -190,9 +213,9 @@ gridEl.addEventListener("dblclick", (event) => {
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
-    setStatus(`copied ${label}`, "busy");
+    setLocalStatus(`copied ${label}`, "busy");
   } catch {
-    setStatus("clipboard blocked by the browser", "error");
+    setLocalStatus("clipboard blocked by the browser", "error");
   }
 }
 
@@ -222,7 +245,11 @@ function menuItemsFor(cellData) {
     },
     { label: "Restart this cell", run: relay("restart") },
     { label: "Reset zoom", hint: `${(zoom ?? 1).toFixed(2)}×`, run: relay("resetZoom") },
-    { label: "Replace with next reserve", run: relay("replaceReserve") },
+    {
+      label: "Replace with next reserve",
+      hint: `${latestGlobal.reservesLeft ?? 0} left`,
+      run: relay("replaceReserve"),
+    },
   ];
 }
 

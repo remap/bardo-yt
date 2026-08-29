@@ -23,8 +23,13 @@
   /* Hidden, not removed: wall-engine.js's getElementById lookups for every
      header control must keep succeeding, since /layout-control drives them
      remotely. This is what keeps the NDI broadcast clean -- nothing here is
-     a JS change. */
-  header { display: none; }
+     a JS change.
+
+     #menu goes with it. contextmenu's preventDefault() only stops the
+     browser's own menu; the app's custom one would still paint over the wall
+     and straight into the broadcast feed. Right-clicking is done on
+     /layout-control, which relays the chosen action as an intent. */
+  header, #menu { display: none; }
   button {
     font: inherit; font-weight: 600; padding: 7px 13px; border-radius: 6px;
     border: 1px solid #3a3a42; background: #1c1c21; color: #e8e8ea; cursor: pointer;

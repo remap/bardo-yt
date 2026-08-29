@@ -543,6 +543,10 @@ function rebuild() {
 let broadcastChannel = null;
 
 function buildSnapshot() {
+  // The heartbeat below fires on a timer, which can beat the first resync() to
+  // the punch -- and computeLayout(config) is the first thing this does.
+  // Nothing useful to publish yet; the next tick will have it.
+  if (!config) return null;
   const layout = computeLayout(config);
   const cells = slotState.slots.map((videoId, index) => {
     const player = players[index];
@@ -595,9 +599,15 @@ function buildSnapshot() {
 function publishSnapshot() {
   if (!broadcastChannel) return;
   try {
-    broadcastChannel.postMessage(buildSnapshot());
-  } catch {
-    // A channel can throw if it has already been closed; nothing useful to do.
+    const snapshot = buildSnapshot();
+    if (!snapshot) return;
+    broadcastChannel.postMessage(snapshot);
+  } catch (error) {
+    // A closed channel is the expected case, but this catch also covers
+    // anything buildSnapshot() itself threw -- and a control page silently
+    // frozen on a stale snapshot is exactly the sort of failure that costs an
+    // afternoon. Say so.
+    wlog("publishSnapshot failed", error);
   }
 }
 
@@ -1112,6 +1122,10 @@ function togglePlayForCell(index) {
 }
 
 function toggleLockedIndex(index) {
+  // Locking audio to a cell with no player would leave the wall silent with
+  // an indicator claiming otherwise. The local dblclick handler already
+  // refuses an empty cell; a relayed cellDblclick reaches here directly.
+  if (gridEl.children[index]?.dataset.empty === "true") return;
   lockedIndex = lockedIndex === index ? null : index;
   for (const other of gridEl.children) delete other.dataset.locked;
   const cell = gridEl.children[index];
@@ -1344,7 +1358,9 @@ function applyCellWheel(index, deltaY, xFraction, yFraction) {
 // how big /layout-control's rectangle happens to be.
 function applyCellPan(index, dxFraction, dyFraction) {
   const cell = gridEl.children[index];
-  if (!cell) return;
+  // Same guard applyCellWheel has: an empty cell has no iframe to move, and
+  // storing a view for it would survive into whatever reserve lands there.
+  if (!cell || cell.dataset.empty === "true") return;
   const bounds = cell.getBoundingClientRect();
   views.set(
     index,
@@ -1379,8 +1395,8 @@ function applyCellMenuAction(index, action) {
 // on THIS page, or one relayed from /layout-control over BroadcastChannel --
 // funnels through here. That symmetry is the whole point: a control-window
 // message and a local click must produce identical effects, so this is the
-// only place either kind is handled. publishSnapshot() (added when
-// BroadcastChannel wiring lands) is a no-op until then.
+// only place either kind is handled. publishSnapshot() at the end is a no-op
+// unless startWall was given a controlChannel, so every path can call it.
 async function applyIntent(intent) {
   switch (intent.type) {
     case "play":
@@ -1402,6 +1418,17 @@ async function applyIntent(intent) {
       resetAllViews();
       break;
     case "newQuery":
+      // `generating` is already set synchronously by requestNewQuery and
+      // cleared in its finally, so this is the same guard the local button's
+      // disabled state gives a local click. A relayed intent never sees that
+      // disabled state -- /layout-control's own button only learns it is
+      // disabled when the next snapshot arrives, up to a heartbeat later --
+      // so the dispatcher itself has to hold the line. Two fast clicks over
+      // the channel would otherwise be two generations at 100 units each.
+      if (generating) {
+        wlog("ignoring newQuery: one is already in flight");
+        break;
+      }
       await requestNewQuery(intent.prompt ?? null);
       break;
     case "hoverUnmuteToggle":
