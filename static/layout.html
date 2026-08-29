@@ -20,6 +20,11 @@
     padding: 8px 14px; border-bottom: 1px solid #26262b; flex: none;
     overflow: hidden;
   }
+  /* Hidden, not removed: wall-engine.js's getElementById lookups for every
+     header control must keep succeeding, since /layout-control drives them
+     remotely. This is what keeps the NDI broadcast clean -- nothing here is
+     a JS change. */
+  header { display: none; }
   button {
     font: inherit; font-weight: 600; padding: 7px 13px; border-radius: 6px;
     border: 1px solid #3a3a42; background: #1c1c21; color: #e8e8ea; cursor: pointer;
