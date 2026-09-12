@@ -244,3 +244,125 @@ def test_the_control_page_reflects_mute_state_from_the_broadcast_page(running_se
             "document.getElementById('mute').textContent.trim() === 'Mute'", timeout=10_000
         )
         browser.close()
+
+
+def test_save_and_restore_zoom_and_video_sets(running_server):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        context = browser.new_context(ignore_https_errors=True)
+        broadcast = context.new_page()
+        control = context.new_page()
+
+        broadcast.goto(f"{running_server}/layout", wait_until="load")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=40_000)
+        control.goto(f"{running_server}/layout-control", wait_until="load")
+        control.wait_for_selector('.cell[data-empty="false"]', timeout=20_000)
+
+        def broadcast_zoom_ratio(nth=0):
+            return broadcast.evaluate(
+                f"""() => {{
+                    const cells = document.querySelectorAll('.cell');
+                    const f = cells[{nth}].querySelector('iframe').getBoundingClientRect();
+                    const c = cells[{nth}].getBoundingClientRect();
+                    return f.width / c.width;
+                }}"""
+            )
+
+        # --- zoom/pan set ---------------------------------------------------
+        box = control.locator(".cell").first.bounding_box()
+        control.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        for _ in range(8):
+            control.mouse.wheel(0, -120)
+        zoomed = broadcast_zoom_ratio()
+        assert zoomed > 1.1, "the wheel above should have zoomed cell 0 in"
+
+        control.fill("#zoom-set-name", "wide shot")
+        control.click("#zoom-set-save")
+        control.wait_for_function(
+            "[...document.getElementById('zoom-set-select').options].some(o => o.value === 'wide shot')",
+            timeout=10_000,
+        )
+
+        control.click("#reset-view")
+        broadcast.wait_for_function(
+            f"() => {{"
+            f"  const cells = document.querySelectorAll('.cell');"
+            f"  const f = cells[0].querySelector('iframe').getBoundingClientRect();"
+            f"  const c = cells[0].getBoundingClientRect();"
+            f"  return f.width / c.width < {zoomed - 0.05};"
+            f"}}",
+            timeout=10_000,
+        )
+
+        control.select_option("#zoom-set-select", "wide shot")
+        control.click("#zoom-set-restore")
+        broadcast.wait_for_function(
+            f"() => {{"
+            f"  const cells = document.querySelectorAll('.cell');"
+            f"  const f = cells[0].querySelector('iframe').getBoundingClientRect();"
+            f"  const c = cells[0].getBoundingClientRect();"
+            f"  return f.width / c.width > {zoomed - 0.05};"
+            f"}}",
+            timeout=10_000,
+        )
+
+        # --- video set -------------------------------------------------------
+        before_ids = broadcast.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+        )
+        control.fill("#video-set-name", "finale")
+        control.click("#video-set-save")
+        control.wait_for_function(
+            "[...document.getElementById('video-set-select').options].some(o => o.value === 'finale')",
+            timeout=10_000,
+        )
+
+        control.click("#shuffle")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=20_000)
+
+        control.select_option("#video-set-select", "finale")
+        control.click("#video-set-restore")
+        broadcast.wait_for_function(
+            "ids => JSON.stringify([...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)) === JSON.stringify(ids)",
+            arg=before_ids,
+            timeout=15_000,
+        )
+        browser.close()
+
+
+def test_a_restored_video_set_survives_a_simulated_reconnect(running_server):
+    """resync() is what a real WebSocket reconnect calls (socket.js's
+    onReconnect) -- window.__resync lets this test trigger exactly that
+    without tearing down and re-establishing a real socket."""
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        context = browser.new_context(ignore_https_errors=True)
+        broadcast = context.new_page()
+        control = context.new_page()
+
+        broadcast.goto(f"{running_server}/layout", wait_until="load")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=40_000)
+        control.goto(f"{running_server}/layout-control", wait_until="load")
+        control.wait_for_selector('.cell[data-empty="false"]', timeout=20_000)
+
+        control.fill("#video-set-name", "finale")
+        control.click("#video-set-save")
+        control.wait_for_function(
+            "[...document.getElementById('video-set-select').options].some(o => o.value === 'finale')",
+            timeout=10_000,
+        )
+        control.select_option("#video-set-select", "finale")
+        control.click("#video-set-restore")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=20_000)
+
+        restored_ids = broadcast.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+        )
+
+        broadcast.evaluate("window.__resync()")
+
+        after_reconnect_ids = broadcast.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+        )
+        assert after_reconnect_ids == restored_ids
+        browser.close()
