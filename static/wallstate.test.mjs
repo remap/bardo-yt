@@ -131,6 +131,18 @@ test("a restored wall says so, so a log can tell it from a fetch", () => {
   assert.equal(loadWall(storage).restored, true);
 });
 
+test("a saved wall defaults to a query source", () => {
+  const storage = fakeStorage();
+  saveWall(MESSAGE, storage);
+  assert.deepEqual(loadWall(storage).source, { type: "query" });
+});
+
+test("an explicit source on the message survives the round trip", () => {
+  const storage = fakeStorage();
+  saveWall({ ...MESSAGE, source: { type: "video-set", name: "finale" } }, storage);
+  assert.deepEqual(loadWall(storage).source, { type: "video-set", name: "finale" });
+});
+
 test("clearing removes the wall", () => {
   const storage = fakeStorage();
   saveWall(MESSAGE, storage);

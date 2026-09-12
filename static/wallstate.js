@@ -116,7 +116,10 @@ export function saveWall(message, storage) {
   // `timings` describes the request that produced this, not the wall, and
   // restoring it would report a stale measurement as though it were fresh.
   const { timings, ...rest } = message;
-  write(storage, WALL_KEY, JSON.stringify({ ...rest, restored: true }));
+  // Defaults to "query" (today's only behavior: the live query drives
+  // resync) unless the caller already set its own -- restoreVideoSet sets
+  // "video-set" so a reconnect knows not to silently re-derive from search.
+  write(storage, WALL_KEY, JSON.stringify({ source: { type: "query" }, ...rest, restored: true }));
 }
 
 export function clearWall(storage) {
