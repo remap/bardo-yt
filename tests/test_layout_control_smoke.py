@@ -333,7 +333,30 @@ def test_save_and_restore_zoom_and_video_sets(running_server):
 def test_a_restored_video_set_survives_a_simulated_reconnect(running_server):
     """resync() is what a real WebSocket reconnect calls (socket.js's
     onReconnect) -- window.__resync lets this test trigger exactly that
-    without tearing down and re-establishing a real socket."""
+    without tearing down and re-establishing a real socket.
+
+    The wall must diverge from its own plain, deterministic default before
+    the assertion that matters, or this test cannot tell a sticky resync
+    apart from a non-sticky one: nothing here ever presses "New query", so
+    `loadQuery()` is empty throughout, and a resync with Task 6's sticky
+    branch deleted would fall through straight to fetching /api/videos with
+    no stored query -- landing right back on the same deterministic
+    cache-ranked order the very first page load already produced
+    (`default_ids` below). If "finale" happened to hold that same default
+    order, a non-sticky resync would reproduce it by accident and the test
+    would pass either way.
+
+    So "finale" is saved from a SHUFFLED state instead -- #shuffle reorders
+    (and can swap in reserves for) the already-fetched pool client-side, with
+    no server round trip at all, so it changes what is on screen without
+    changing what a later plain /api/videos fetch would return. That gives
+    two provably different candidates for "what resync produces": the
+    shuffled-then-saved `finale_ids`, and the untouched `default_ids". A
+    sticky resync reapplies the restored `finale_ids` from localStorage
+    unchanged; a non-sticky one re-derives `default_ids` from the server.
+    Asserting the post-resync ids equal `finale_ids` -- and explicitly do NOT
+    equal `default_ids` -- is a real proof, not a coincidence.
+    """
     with sync_playwright() as p:
         browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
         context = browser.new_context(ignore_https_errors=True)
@@ -345,24 +368,53 @@ def test_a_restored_video_set_survives_a_simulated_reconnect(running_server):
         control.goto(f"{running_server}/layout-control", wait_until="load")
         control.wait_for_selector('.cell[data-empty="false"]', timeout=20_000)
 
+        def video_ids():
+            return broadcast.evaluate(
+                "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+            )
+
+        default_ids = video_ids()
+
+        control.click("#shuffle")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=20_000)
+        finale_ids = video_ids()
+        assert finale_ids != default_ids, (
+            "the shuffle above should have changed the on-screen set -- "
+            "otherwise 'finale' would be indistinguishable from the "
+            "deterministic default and this test could not tell a sticky "
+            "resync from a non-sticky one"
+        )
+
         control.fill("#video-set-name", "finale")
         control.click("#video-set-save")
         control.wait_for_function(
             "[...document.getElementById('video-set-select').options].some(o => o.value === 'finale')",
             timeout=10_000,
         )
-        control.select_option("#video-set-select", "finale")
-        control.click("#video-set-restore")
+
+        # Diverge the live wall again so restoring "finale" below is a real
+        # change, not a no-op that would prove nothing either way.
+        control.click("#shuffle")
         broadcast.wait_for_function("window.__prerolled === true", timeout=20_000)
 
-        restored_ids = broadcast.evaluate(
-            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
+        control.select_option("#video-set-select", "finale")
+        control.click("#video-set-restore")
+        broadcast.wait_for_function(
+            "ids => JSON.stringify([...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)) === JSON.stringify(ids)",
+            arg=finale_ids,
+            timeout=15_000,
         )
+        restored_ids = video_ids()
+        assert restored_ids == finale_ids
+        assert restored_ids != default_ids
 
         broadcast.evaluate("window.__resync()")
 
-        after_reconnect_ids = broadcast.evaluate(
-            "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
-        )
+        after_reconnect_ids = video_ids()
+        # The property that actually distinguishes sticky from non-sticky: a
+        # non-sticky resync would ignore the restored "finale" state and
+        # re-fetch /api/videos with no stored query, landing back on
+        # default_ids -- which was just proven to differ from restored_ids.
         assert after_reconnect_ids == restored_ids
+        assert after_reconnect_ids != default_ids
         browser.close()
