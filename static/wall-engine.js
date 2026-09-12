@@ -19,6 +19,8 @@ import {
   IDENTITY_VIEW,
   needsRefetch,
   overridesStoredQuery,
+  viewsToZoomSet,
+  slotStateToVideoSet,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
@@ -158,6 +160,8 @@ const rewindButton = document.getElementById("rewind");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
+let zoomSetNames = [];
+let videoSetNames = [];
 let players = [];
 let apiReady = false;
 // Set once a `videos` payload has actually been applied. Until then there is
@@ -577,6 +581,8 @@ function buildSnapshot() {
 
   return {
     type: "snapshot",
+    zoomSets: zoomSetNames,
+    videoSets: videoSetNames,
     global: {
       status: statusEl.textContent,
       statusState: statusEl.dataset.state ?? "",
@@ -950,6 +956,7 @@ async function resync() {
     return;
   }
   config = fetchedConfig;
+  await Promise.all([refreshZoomSetNames(), refreshVideoSetNames()]);
 
   // Seed once. On a later reconnect the button, not the file, is the truth.
   if (!seededMuteFromConfig) {
@@ -992,6 +999,21 @@ async function resync() {
   // and the wall unrendered.
   const seq = ++applySeq;
   const stored = loadQuery();
+  const remembered = loadWall();
+
+  // A restored video set is sticky: unlike a query-driven wall (below, first
+  // resync of a page load only), this must survive EVERY resync -- including
+  // a later reconnect -- or a routine WebSocket hiccup would silently swap
+  // the operator's named set back for whatever the live query produces.
+  if (remembered?.source?.type === "video-set") {
+    wlog(
+      `resync: sticking with video set ${JSON.stringify(remembered.source.name)} -- ` +
+        "not re-deriving from search",
+    );
+    restoredThisLoad = true;
+    applyVideos(remembered);
+    return;
+  }
 
   // A wall this browser has already been shown is restored as it was, with no
   // request at all. Re-resolving the query was never free -- the search was a
@@ -1004,7 +1026,6 @@ async function resync() {
   // config change, and those exist precisely to go and look.
   if (!restoredThisLoad) {
     restoredThisLoad = true;
-    const remembered = loadWall();
     if (remembered) {
       wlog(
         `restored ${(remembered.video_ids ?? []).filter(Boolean).length} videos from this browser ` +
@@ -1369,6 +1390,20 @@ function applyCellPan(index, dxFraction, dyFraction) {
   applyCoverFit(cell);
 }
 
+// The restore half of a named zoom set: apply one saved view to one cell,
+// the same tail flushZoom already runs after a live wheel step (set the
+// view, refit the iframe, flag whether it counts as "zoomed" for the
+// data-zoomed CSS hook). Cells outside the live cell count, or currently
+// empty, are silently skipped -- a set saved under a different layout total
+// must not throw on the cells it no longer has anything to say about.
+function applyCellView(index, view) {
+  const cell = gridEl.children[index];
+  if (!cell || cell.dataset.empty === "true") return;
+  views.set(index, view);
+  applyCoverFit(cell);
+  cell.dataset.zoomed = view.zoom > 1.001 ? "true" : "false";
+}
+
 function applyCellMenuAction(index, action) {
   switch (action) {
     case "togglePlay":
@@ -1397,6 +1432,16 @@ function applyCellMenuAction(index, action) {
 // message and a local click must produce identical effects, so this is the
 // only place either kind is handled. publishSnapshot() at the end is a no-op
 // unless startWall was given a controlChannel, so every path can call it.
+async function refreshZoomSetNames() {
+  const response = await tfetch("GET /api/zoom-sets", "/api/zoom-sets");
+  zoomSetNames = response.ok ? await response.json() : [];
+}
+
+async function refreshVideoSetNames() {
+  const response = await tfetch("GET /api/video-sets", "/api/video-sets");
+  videoSetNames = response.ok ? await response.json() : [];
+}
+
 async function applyIntent(intent) {
   switch (intent.type) {
     case "play":
@@ -1463,6 +1508,82 @@ async function applyIntent(intent) {
       break;
     case "cellMenuAction":
       applyCellMenuAction(intent.index, intent.action);
+      break;
+    case "saveZoomSet":
+      await tfetch(
+        `PUT /api/zoom-sets/${intent.name}`,
+        `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ views: viewsToZoomSet(views) }),
+        },
+      );
+      await refreshZoomSetNames();
+      break;
+    case "restoreZoomSet": {
+      const response = await tfetch(
+        `GET /api/zoom-sets/${intent.name}`,
+        `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
+      );
+      if (response.ok) {
+        const zoomSet = await response.json();
+        for (const [key, view] of Object.entries(zoomSet.views)) {
+          applyCellView(Number(key), view);
+        }
+      }
+      break;
+    }
+    case "deleteZoomSet":
+      await tfetch(
+        `DELETE /api/zoom-sets/${intent.name}`,
+        `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
+        { method: "DELETE" },
+      );
+      await refreshZoomSetNames();
+      break;
+    case "saveVideoSet":
+      await tfetch(
+        `PUT /api/video-sets/${intent.name}`,
+        `/api/video-sets/${encodeURIComponent(intent.name)}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(slotStateToVideoSet(slotState)),
+        },
+      );
+      await refreshVideoSetNames();
+      break;
+    case "restoreVideoSet": {
+      const response = await tfetch(
+        `GET /api/video-sets/${intent.name}`,
+        `/api/video-sets/${encodeURIComponent(intent.name)}`,
+      );
+      if (response.ok) {
+        const videoSet = await response.json();
+        // A synthetic message shaped like a normal /api/videos response, so
+        // applyVideos() (and everything downstream of it -- rebuild(),
+        // saveWall()) needs no special case for where the ids came from.
+        // `source` is what makes resync() stick with this set instead of
+        // re-deriving from search on the next reconnect (see below).
+        applyVideos({
+          query: `named set “${intent.name}”`,
+          video_ids: videoSet.video_ids,
+          reserves: videoSet.reserves,
+          titles: {},
+          from_cache: true,
+          source: { type: "video-set", name: intent.name },
+        });
+      }
+      break;
+    }
+    case "deleteVideoSet":
+      await tfetch(
+        `DELETE /api/video-sets/${intent.name}`,
+        `/api/video-sets/${encodeURIComponent(intent.name)}`,
+        { method: "DELETE" },
+      );
+      await refreshVideoSetNames();
       break;
     default:
       wlog(`applyIntent: unknown intent type ${intent.type}`);
@@ -1583,6 +1704,10 @@ if (controlChannel) {
   // stale, without instrumenting every low-level mutation site.
   setInterval(publishSnapshot, 1000);
 }
+
+// Exposed for the browser smoke test to assert reconnect behavior directly --
+// socket.js calls exactly this function on every WebSocket (re)connect.
+window.__resync = resync;
 
 connectSocket({
   onReconnect: resync,
