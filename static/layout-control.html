@@ -26,6 +26,21 @@
     white-space: nowrap; flex: none;
   }
   button:hover { background: #26262d; }
+  .sets-row {
+    display: flex; flex-wrap: wrap; gap: 18px;
+    padding: 6px 14px; border-bottom: 1px solid #26262b; flex: none;
+  }
+  .set-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .set-label { color: #8a8a94; white-space: nowrap; }
+  .sets-row select {
+    font: inherit; padding: 6px 9px; border-radius: 6px; max-width: 160px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+  }
+  .sets-row input[type="text"] {
+    font: inherit; padding: 6px 9px; border-radius: 6px; width: 140px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+  }
+  .sets-row input[type="text"]:focus { outline: none; border-color: #5a5a68; }
   /* min-width, not 0: this line reports the query, the cache state, the quota
      and every error, and `flex: 1 1 auto; min-width: 0` let it shrink to zero
      width and vanish silently once the header gained one more control. It
@@ -127,6 +142,24 @@
     <span id="status">loading…</span>
     <a href="/layout">← broadcast</a>
   </header>
+  <div class="sets-row">
+    <div class="set-group">
+      <span class="set-label">Zoom/pan:</span>
+      <select id="zoom-set-select"></select>
+      <button id="zoom-set-restore">Restore</button>
+      <button id="zoom-set-delete">Delete</button>
+      <input id="zoom-set-name" type="text" spellcheck="false" placeholder="name this look">
+      <button id="zoom-set-save">Save</button>
+    </div>
+    <div class="set-group">
+      <span class="set-label">Videos:</span>
+      <select id="video-set-select"></select>
+      <button id="video-set-restore">Restore</button>
+      <button id="video-set-delete">Delete</button>
+      <input id="video-set-name" type="text" spellcheck="false" placeholder="name this set">
+      <button id="video-set-save">Save</button>
+    </div>
+  </div>
   <div id="grid"></div>
   <div id="menu" hidden></div>
   <script type="module" src="/static/layout-control.js"></script>

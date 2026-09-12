@@ -19,6 +19,10 @@ const resetViewButton = document.getElementById("reset-view");
 const shuffleButton = document.getElementById("shuffle");
 const audioEl = document.getElementById("audio");
 const rewindButton = document.getElementById("rewind");
+const zoomSetSelect = document.getElementById("zoom-set-select");
+const zoomSetNameInput = document.getElementById("zoom-set-name");
+const videoSetSelect = document.getElementById("video-set-select");
+const videoSetNameInput = document.getElementById("video-set-name");
 
 function send(intent) {
   channel.postMessage(intent);
@@ -66,9 +70,24 @@ let latestCells = [];
 let latestGlobal = {};
 let staleTimer = null;
 
+function renderSetOptions(select, names) {
+  const previous = select.value;
+  select.replaceChildren(
+    ...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      return option;
+    }),
+  );
+  if (names.includes(previous)) select.value = previous;
+}
+
 function renderFromSnapshot(snapshot) {
   latestCells = snapshot.cells;
   latestGlobal = snapshot.global;
+  renderSetOptions(zoomSetSelect, snapshot.zoomSets ?? []);
+  renderSetOptions(videoSetSelect, snapshot.videoSets ?? []);
   const g = snapshot.global;
   if (Date.now() - localStatusAt >= LOCAL_STATUS_HOLD_MS) setStatus(g.status, g.statusState);
   audioEl.textContent = g.audioIndicatorText;
@@ -142,6 +161,32 @@ newQueryButton.addEventListener("click", () => {
   // after a click invites the second click.
   newQueryButton.disabled = true;
   send({ type: "newQuery", prompt: prompt || null });
+});
+
+document.getElementById("zoom-set-save").addEventListener("click", () => {
+  const name = zoomSetNameInput.value.trim();
+  if (!name) return;
+  send({ type: "saveZoomSet", name });
+  zoomSetNameInput.value = "";
+});
+document.getElementById("zoom-set-restore").addEventListener("click", () => {
+  if (zoomSetSelect.value) send({ type: "restoreZoomSet", name: zoomSetSelect.value });
+});
+document.getElementById("zoom-set-delete").addEventListener("click", () => {
+  if (zoomSetSelect.value) send({ type: "deleteZoomSet", name: zoomSetSelect.value });
+});
+
+document.getElementById("video-set-save").addEventListener("click", () => {
+  const name = videoSetNameInput.value.trim();
+  if (!name) return;
+  send({ type: "saveVideoSet", name });
+  videoSetNameInput.value = "";
+});
+document.getElementById("video-set-restore").addEventListener("click", () => {
+  if (videoSetSelect.value) send({ type: "restoreVideoSet", name: videoSetSelect.value });
+});
+document.getElementById("video-set-delete").addEventListener("click", () => {
+  if (videoSetSelect.value) send({ type: "deleteVideoSet", name: videoSetSelect.value });
 });
 
 function cellIndexOf(target) {
