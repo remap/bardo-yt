@@ -351,7 +351,7 @@ def test_a_restored_video_set_survives_a_simulated_reconnect(running_server):
     no server round trip at all, so it changes what is on screen without
     changing what a later plain /api/videos fetch would return. That gives
     two provably different candidates for "what resync produces": the
-    shuffled-then-saved `finale_ids`, and the untouched `default_ids". A
+    shuffled-then-saved `finale_ids`, and the untouched `default_ids`. A
     sticky resync reapplies the restored `finale_ids` from localStorage
     unchanged; a non-sticky one re-derives `default_ids` from the server.
     Asserting the post-resync ids equal `finale_ids` -- and explicitly do NOT

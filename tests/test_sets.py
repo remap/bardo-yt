@@ -68,8 +68,16 @@ async def test_a_zoom_set_name_with_spaces_and_slashes_round_trips(store):
 
 
 async def test_saving_under_an_existing_zoom_set_name_overwrites_it(store):
-    await save_zoom_set(store, "n", ZoomSetPayload.model_validate({"views": {"0": {"zoom": 1, "offsetX": 0, "offsetY": 0}}}))
-    await save_zoom_set(store, "n", ZoomSetPayload.model_validate({"views": {"1": {"zoom": 2, "offsetX": 0, "offsetY": 0}}}))
+    await save_zoom_set(
+        store,
+        "n",
+        ZoomSetPayload.model_validate({"views": {"0": {"zoom": 1, "offsetX": 0, "offsetY": 0}}}),
+    )
+    await save_zoom_set(
+        store,
+        "n",
+        ZoomSetPayload.model_validate({"views": {"1": {"zoom": 2, "offsetX": 0, "offsetY": 0}}}),
+    )
     saved = await load_zoom_set(store, "n")
     assert list(saved.views.keys()) == ["1"]
     assert await list_zoom_set_names(store) == ["n"]
@@ -201,7 +209,9 @@ def test_a_rejected_zoom_set_put_leaves_an_existing_one_untouched(app_env):
     """Mirrors gotcha 8's config guarantee for this new resource."""
     app, store = app_env
     with TestClient(app) as client:
-        client.put("/api/zoom-sets/n", json={"views": {"0": {"zoom": 1, "offsetX": 0, "offsetY": 0}}})
+        client.put(
+            "/api/zoom-sets/n", json={"views": {"0": {"zoom": 1, "offsetX": 0, "offsetY": 0}}}
+        )
         response = client.put("/api/zoom-sets/n", json={"views": {"0": {"zoom": "not a number"}}})
         assert response.status_code == 422
     from ytmatrix.sets import load_zoom_set
@@ -219,7 +229,9 @@ def test_get_video_sets_starts_empty(app_env):
 def test_put_then_get_video_set(app_env):
     app, _ = app_env
     with TestClient(app) as client:
-        put = client.put("/api/video-sets/finale", json={"video_ids": ["a", "b"], "reserves": ["c"]})
+        put = client.put(
+            "/api/video-sets/finale", json={"video_ids": ["a", "b"], "reserves": ["c"]}
+        )
         assert put.status_code == 200
         assert client.get("/api/video-sets").json() == ["finale"]
         got = client.get("/api/video-sets/finale")
