@@ -158,6 +158,15 @@ class LayoutConfig(Strict):
     screens: dict[str, Annotated[int, Field(ge=0)] | Literal["auto", "none"]] = Field(
         default_factory=dict
     )
+    # An operator-adjustable nudge on top of screens.json's own (static,
+    # hand-copied -- gotcha 39) layout_offset, not a replacement for it: this
+    # one is expected to change often, mid-show, from /layout-control; that
+    # one is venue geometry that rarely changes. Applied as a single CSS
+    # transform on the whole #grid container (static/layout-page.js), so it
+    # shifts every screen's placement at once without touching layout-fit.js's
+    # per-cell math at all.
+    offset_x: int = 0
+    offset_y: int = 0
 
     @model_validator(mode="after")
     def _explicit_counts_fit_the_budget(self) -> LayoutConfig:

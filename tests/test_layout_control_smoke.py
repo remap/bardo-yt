@@ -418,3 +418,62 @@ def test_a_restored_video_set_survives_a_simulated_reconnect(running_server):
         assert after_reconnect_ids == restored_ids
         assert after_reconnect_ids != default_ids
         browser.close()
+
+
+def test_global_layout_shift_from_the_control_page(running_server):
+    """Nudge and Set both round-trip through PUT /api/config (shared,
+    persistent -- unlike zoom/pan or video sets, this must survive a reload
+    for anyone else watching), and the resulting shift lands as a CSS
+    transform on /layout's own #grid container, not on any individual cell.
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        context = browser.new_context(ignore_https_errors=True)
+        broadcast = context.new_page()
+        control = context.new_page()
+
+        broadcast.goto(f"{running_server}/layout", wait_until="load")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=40_000)
+        control.goto(f"{running_server}/layout-control", wait_until="load")
+        control.wait_for_selector('.cell[data-empty="false"]', timeout=20_000)
+
+        def grid_transform():
+            return broadcast.evaluate("document.getElementById('grid').style.transform")
+
+        assert grid_transform() == "translate(0px, 0px)"
+        control.wait_for_function(
+            "document.getElementById('shift-readout').textContent === '0, 0'", timeout=10_000
+        )
+
+        control.click("#shift-right")
+        broadcast.wait_for_function(
+            "document.getElementById('grid').style.transform === 'translate(10px, 0px)'",
+            timeout=10_000,
+        )
+        control.wait_for_function(
+            "document.getElementById('shift-readout').textContent === '10, 0'", timeout=10_000
+        )
+
+        control.click("#shift-down")
+        broadcast.wait_for_function(
+            "document.getElementById('grid').style.transform === 'translate(10px, 10px)'",
+            timeout=10_000,
+        )
+
+        control.fill("#shift-x", "-25")
+        control.fill("#shift-y", "40")
+        control.click("#shift-set")
+        broadcast.wait_for_function(
+            "document.getElementById('grid').style.transform === 'translate(-25px, 40px)'",
+            timeout=10_000,
+        )
+        control.wait_for_function(
+            "document.getElementById('shift-readout').textContent === '-25, 40'", timeout=10_000
+        )
+
+        control.click("#shift-reset")
+        broadcast.wait_for_function(
+            "document.getElementById('grid').style.transform === 'translate(0px, 0px)'",
+            timeout=10_000,
+        )
+        browser.close()

@@ -284,6 +284,17 @@ def test_layout_accepts_auto_and_none_and_explicit_counts():
     assert layout.screens == {"F": "auto", "D": "none", "C": 2}
     assert layout.total == 8  # default
     assert layout.max_per_screen == 3  # default
+    assert layout.offset_x == 0  # default
+    assert layout.offset_y == 0  # default
+
+
+def test_layout_offset_accepts_negative_values():
+    # A physical-alignment nudge legitimately shifts left/up, unlike total or
+    # max_per_screen -- no lower bound applies here.
+    data = {**VALID, "layout": {"offset_x": -25, "offset_y": -10}}
+    layout = Config.model_validate(data).layout
+    assert layout.offset_x == -25
+    assert layout.offset_y == -10
 
 
 def test_layout_rejects_an_unknown_screen_value():

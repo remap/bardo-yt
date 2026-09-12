@@ -597,6 +597,7 @@ function buildSnapshot() {
       newQueryVisible: !newQueryButton.hidden,
       newQueryDisabled: newQueryButton.disabled,
       reservesLeft: slotState.reserves.length,
+      layoutOffset: { x: config.layout?.offset_x ?? 0, y: config.layout?.offset_y ?? 0 },
     },
     cells,
   };
@@ -1628,6 +1629,34 @@ async function applyIntent(intent) {
       }
       break;
     }
+    case "nudgeLayoutOffset": {
+      // Relative to the CURRENT shared config, not to whatever this browser
+      // last rendered -- two operators nudging at once should compose, not
+      // race each other back to a stale base.
+      const currentX = config.layout?.offset_x ?? 0;
+      const currentY = config.layout?.offset_y ?? 0;
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          layout: { offset_x: currentX + intent.dx, offset_y: currentY + intent.dy },
+        }),
+      });
+      if (!response.ok) setStatus("couldn't adjust the layout shift", "error");
+      // No local re-apply here: the PUT's own config broadcast (server.py's
+      // put_config) reaches this same browser over /ws, and the socket
+      // onMessage handler below re-applies containerStyle unconditionally.
+      break;
+    }
+    case "setLayoutOffset": {
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { offset_x: intent.x, offset_y: intent.y } }),
+      });
+      if (!response.ok) setStatus("couldn't adjust the layout shift", "error");
+      break;
+    }
     default:
       wlog(`applyIntent: unknown intent type ${intent.type}`);
       return;
@@ -1772,6 +1801,14 @@ connectSocket({
     const change = classifyConfigChange(previous, message.config);
     config = message.config;
     wlog(`config pushed: change=${change}`);
+    // Unconditional, regardless of classifyConfigChange's verdict: a field
+    // that only affects a purely visual property computeLayout derives (e.g.
+    // layout.offset_x/y) is invisible to classifyConfigChange's grid/playback
+    // key list, and rebuild()/applyInPlace() are the wrong tool for it anyway
+    // -- no need to tear down players or seek for a shift. Cheap and
+    // idempotent: rebuild() below already does this itself while building
+    // cells, so this is a harmless double-apply in that case.
+    Object.assign(gridEl.style, computeLayout(config).containerStyle);
     if (change === "rebuild") rebuild();
     else if (change === "in-place") applyInPlace();
     // Someone typed a query on the config page: that is an explicit

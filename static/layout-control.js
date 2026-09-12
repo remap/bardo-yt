@@ -23,6 +23,13 @@ const zoomSetSelect = document.getElementById("zoom-set-select");
 const zoomSetNameInput = document.getElementById("zoom-set-name");
 const videoSetSelect = document.getElementById("video-set-select");
 const videoSetNameInput = document.getElementById("video-set-name");
+const shiftReadout = document.getElementById("shift-readout");
+const shiftXInput = document.getElementById("shift-x");
+const shiftYInput = document.getElementById("shift-y");
+
+// Pixels per click -- a physical-alignment nudge is dialed in a few clicks
+// at a time while watching the real NDI output, not computed in advance.
+const LAYOUT_SHIFT_STEP_PX = 10;
 
 function send(intent) {
   channel.postMessage(intent);
@@ -96,6 +103,8 @@ function renderFromSnapshot(snapshot) {
   renderSetOptions(zoomSetSelect, snapshot.zoomSets ?? []);
   renderSetOptions(videoSetSelect, snapshot.videoSets ?? []);
   const g = snapshot.global;
+  const offset = g.layoutOffset ?? { x: 0, y: 0 };
+  shiftReadout.textContent = `${offset.x}, ${offset.y}`;
   if (Date.now() - localStatusAt >= LOCAL_STATUS_HOLD_MS) setStatus(g.status, g.statusState);
   audioEl.textContent = g.audioIndicatorText;
   audioEl.dataset.locked = String(g.audioLocked);
@@ -208,6 +217,38 @@ document.getElementById("video-set-restore").addEventListener("click", () => {
 document.getElementById("video-set-delete").addEventListener("click", () => {
   if (videoSetSelect.value) send({ type: "deleteVideoSet", name: videoSetSelect.value });
 });
+
+document.getElementById("shift-up").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: 0, dy: -LAYOUT_SHIFT_STEP_PX }),
+);
+document.getElementById("shift-down").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: 0, dy: LAYOUT_SHIFT_STEP_PX }),
+);
+document.getElementById("shift-left").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: -LAYOUT_SHIFT_STEP_PX, dy: 0 }),
+);
+document.getElementById("shift-right").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: LAYOUT_SHIFT_STEP_PX, dy: 0 }),
+);
+document.getElementById("shift-set").addEventListener("click", () => {
+  const x = Number.parseInt(shiftXInput.value, 10);
+  const y = Number.parseInt(shiftYInput.value, 10);
+  // An input left blank (or non-numeric) means "leave that axis alone" --
+  // parseInt("", 10) is NaN, and falling back to the current readout value
+  // (rather than 0) is what makes typing just an x, with y left blank, do
+  // the obviously-intended thing instead of resetting y to zero.
+  const [currentX, currentY] = shiftReadout.textContent.split(", ").map(Number);
+  send({
+    type: "setLayoutOffset",
+    x: Number.isFinite(x) ? x : currentX,
+    y: Number.isFinite(y) ? y : currentY,
+  });
+  shiftXInput.value = "";
+  shiftYInput.value = "";
+});
+document.getElementById("shift-reset").addEventListener("click", () =>
+  send({ type: "setLayoutOffset", x: 0, y: 0 }),
+);
 
 function cellIndexOf(target) {
   const cell = target.closest(".cell");

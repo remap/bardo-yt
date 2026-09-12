@@ -36,11 +36,15 @@
     font: inherit; padding: 6px 9px; border-radius: 6px; max-width: 160px;
     border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
   }
-  .sets-row input[type="text"] {
+  .sets-row input[type="text"], .sets-row input[type="number"] {
     font: inherit; padding: 6px 9px; border-radius: 6px; width: 140px;
     border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
   }
-  .sets-row input[type="text"]:focus { outline: none; border-color: #5a5a68; }
+  .sets-row input[type="text"]:focus, .sets-row input[type="number"]:focus {
+    outline: none; border-color: #5a5a68;
+  }
+  .shift-num { width: 64px !important; }
+  #shift-readout { color: #8a8a94; min-width: 5em; text-align: right; }
   /* min-width, not 0: this line reports the query, the cache state, the quota
      and every error, and `flex: 1 1 auto; min-width: 0` let it shrink to zero
      width and vanish silently once the header gained one more control. It
@@ -158,6 +162,18 @@
       <button id="video-set-delete">Delete</button>
       <input id="video-set-name" type="text" spellcheck="false" placeholder="name this set">
       <button id="video-set-save">Save</button>
+    </div>
+    <div class="set-group">
+      <span class="set-label">Shift:</span>
+      <button id="shift-up" title="Nudge the whole wall up">↑</button>
+      <button id="shift-down" title="Nudge the whole wall down">↓</button>
+      <button id="shift-left" title="Nudge the whole wall left">←</button>
+      <button id="shift-right" title="Nudge the whole wall right">→</button>
+      <span id="shift-readout">0, 0</span>
+      <input id="shift-x" class="shift-num" type="number" step="1" placeholder="x">
+      <input id="shift-y" class="shift-num" type="number" step="1" placeholder="y">
+      <button id="shift-set">Set</button>
+      <button id="shift-reset">Reset</button>
     </div>
   </div>
   <div id="grid"></div>

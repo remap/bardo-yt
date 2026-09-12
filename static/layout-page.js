@@ -2,9 +2,10 @@ import { startWall } from "./wall-engine.js";
 import { resolveLayout } from "./layout-fit.js";
 
 // Mirrors ytmatrix/config.py's LayoutConfig defaults (total=8,
-// max_per_screen=3, screens={}) -- used only when config.layout is entirely
-// absent, which it is until someone edits it on the config page.
-const DEFAULT_LAYOUT_CONFIG = { total: 8, max_per_screen: 3, screens: {} };
+// max_per_screen=3, screens={}, offset_x=0, offset_y=0) -- used only when
+// config.layout is entirely absent, which it is until someone edits it on
+// the config page.
+const DEFAULT_LAYOUT_CONFIG = { total: 8, max_per_screen: 3, screens: {}, offset_x: 0, offset_y: 0 };
 
 let screensData = null;
 
@@ -30,6 +31,11 @@ async function loadScreens() {
 function computeLayout(config) {
   const layoutConfig = config.layout ?? DEFAULT_LAYOUT_CONFIG;
   const resolved = resolveLayout(screensData, layoutConfig);
+  // A single transform on the whole container, not a change to any
+  // placement's own left/top -- shifts every screen at once, in real
+  // rendered pixels, without touching resolveLayout's per-cell math.
+  const offsetX = layoutConfig.offset_x ?? 0;
+  const offsetY = layoutConfig.offset_y ?? 0;
   return {
     totalCells: resolved.totalCells,
     containerStyle: {
@@ -37,6 +43,7 @@ function computeLayout(config) {
       position: "relative",
       width: "100%",
       height: "100%",
+      transform: `translate(${offsetX}px, ${offsetY}px)`,
     },
     cellRect: (index) => {
       const placement = resolved.placements[index];
