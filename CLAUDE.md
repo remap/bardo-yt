@@ -54,6 +54,7 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 | `ytmatrix/motion.py` | Scores real video vs. still-image-with-audio from storyboard frames; ranks the wall. |
 | `ytmatrix/querylog.py` | The query log: one JSON object per query under `logs/<date>/`, keyed so listing sorts chronologically. Local-time stamped, records who asked. |
 | `ytmatrix/origin.py` | Country-of-origin lookup + round-robin reorder so the wall spans places. |
+| `ytmatrix/sets.py` | Named, server-side saved sets: a zoom/pan "look" (`zoom-sets/`) and a video set (`video-sets/`), each one JSON object per name over the `Store`, keyed and quoted the way `querylog.py` keys its entries. Knows nothing about the live wall, `BroadcastChannel`, or which cell is which — that mapping is `wall-engine.js`'s job. |
 | `ytmatrix/server.py` | FastAPI routes, WS fan-out, and the cache-first `resolve_videos` that wires the three above. Holds no per-user state. |
 | `ytmatrix/settings.py` | Env/secrets. `YOUTUBE_API_KEY` lives here, never in `config.yaml`. |
 | `ytmatrix/certs.py` | Self-signed cert generation (copied from layout-driver). Local only. |
@@ -594,3 +595,31 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     though a browser or `curl` accepts it. Confirmed live: setting
     `SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem` in the caller's environment
     fixes it with no code change on either side.
+
+43. **A restored video set is sticky across a reconnect; a restored zoom set is
+    not — and that asymmetry is deliberate, not an oversight.** `/layout-control`
+    can save, restore, and delete two kinds of named server-side set
+    (`ytmatrix/sets.py`, `zoom-sets/` and `video-sets/`, eight routes, six new
+    `applyIntent` cases in `wall-engine.js`).
+
+    `restoreVideoSet` calls `applyVideos()` with `source: {type: "video-set",
+    name}`, which `saveWall()` persists — and `resync()` (gotcha 28's own
+    function) checks `loadWall()?.source?.type === "video-set"` *before* its
+    stored-query branch and, if it matches, reapplies the saved set and returns
+    without touching search at all. That check runs on **every** resync, not
+    just the first one per page load, so it is a conditional exception to
+    gotcha 28's "a reconnect always re-derives from the stored query": while a
+    wall is sticky on a restored video set, a WebSocket reconnect leaves it
+    alone instead of re-fetching. Deleting the set a wall is currently sticky
+    on has to clear that stickiness explicitly (`deleteVideoSet` checks
+    `loadWall()?.source?.name` against the deleted name and calls `clearWall()`
+    + `resync()` itself) or the wall would keep reapplying a now-nonexistent
+    set forever, every reconnect, with nothing else able to shake it loose.
+
+    A restored *zoom* set gets no equivalent protection, on purpose: `views`
+    is in-memory only, `rebuild()` already calls `views.clear()` on every
+    rebuild (unchanged by this feature), and a rebuild is exactly what a
+    reconnect-triggered resync produces when it re-fetches. So a zoom-set
+    restore is fragile in a way a video-set restore is not — it survives until
+    the next rebuild, full stop — and that is the correct, narrower guarantee
+    for "look" versus "content."
