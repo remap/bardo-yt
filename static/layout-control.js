@@ -71,6 +71,13 @@ let latestGlobal = {};
 let staleTimer = null;
 
 function renderSetOptions(select, names) {
+  // Rebuilding runs on every snapshot, including the 1s heartbeat -- so if
+  // the name list hasn't actually changed, leave the <option> elements alone.
+  // replaceChildren() unconditionally would visually disrupt a dropdown the
+  // operator currently has open, for no reason at all.
+  const current = [...select.options].map((option) => option.value).join(" ");
+  if (current === names.join(" ")) return;
+
   const previous = select.value;
   select.replaceChildren(
     ...names.map((name) => {
@@ -166,6 +173,13 @@ newQueryButton.addEventListener("click", () => {
 document.getElementById("zoom-set-save").addEventListener("click", () => {
   const name = zoomSetNameInput.value.trim();
   if (!name) return;
+  // PUT /api/zoom-sets/{name} takes name as a single URL path segment -- a
+  // literal "/" would 404 there, silently, after the input has already been
+  // cleared below. Reject it here instead of losing the save without a trace.
+  if (name.includes("/")) {
+    setLocalStatus(`set names can't contain "/"`, "error");
+    return;
+  }
   send({ type: "saveZoomSet", name });
   zoomSetNameInput.value = "";
 });
@@ -179,6 +193,12 @@ document.getElementById("zoom-set-delete").addEventListener("click", () => {
 document.getElementById("video-set-save").addEventListener("click", () => {
   const name = videoSetNameInput.value.trim();
   if (!name) return;
+  // Same restriction as the zoom-set save button above: PUT /api/video-sets/{name}
+  // is a single URL path segment.
+  if (name.includes("/")) {
+    setLocalStatus(`set names can't contain "/"`, "error");
+    return;
+  }
   send({ type: "saveVideoSet", name });
   videoSetNameInput.value = "";
 });

@@ -1509,8 +1509,8 @@ async function applyIntent(intent) {
     case "cellMenuAction":
       applyCellMenuAction(intent.index, intent.action);
       break;
-    case "saveZoomSet":
-      await tfetch(
+    case "saveZoomSet": {
+      const response = await tfetch(
         `PUT /api/zoom-sets/${intent.name}`,
         `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
         {
@@ -1519,31 +1519,48 @@ async function applyIntent(intent) {
           body: JSON.stringify({ views: viewsToZoomSet(views) }),
         },
       );
+      if (!response.ok) {
+        setStatus(`could not save zoom set "${intent.name}"`, "error");
+        break;
+      }
       await refreshZoomSetNames();
       break;
+    }
     case "restoreZoomSet": {
       const response = await tfetch(
         `GET /api/zoom-sets/${intent.name}`,
         `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
       );
-      if (response.ok) {
-        const zoomSet = await response.json();
-        for (const [key, view] of Object.entries(zoomSet.views)) {
-          applyCellView(Number(key), view);
-        }
+      if (!response.ok) {
+        setStatus(`no zoom set named "${intent.name}"`, "error");
+        break;
+      }
+      const zoomSet = await response.json();
+      // A saved set is a whole-wall snapshot, not a patch: reset every live
+      // cell to identity first, so a cell that is zoomed for some OTHER
+      // reason (left over from before this restore) is reset too, not just
+      // merged with whatever the set happens to mention.
+      resetAllViews();
+      for (const [key, view] of Object.entries(zoomSet.views)) {
+        applyCellView(Number(key), view);
       }
       break;
     }
-    case "deleteZoomSet":
-      await tfetch(
+    case "deleteZoomSet": {
+      const response = await tfetch(
         `DELETE /api/zoom-sets/${intent.name}`,
         `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
         { method: "DELETE" },
       );
+      if (!response.ok) {
+        setStatus(`no zoom set named "${intent.name}"`, "error");
+        break;
+      }
       await refreshZoomSetNames();
       break;
-    case "saveVideoSet":
-      await tfetch(
+    }
+    case "saveVideoSet": {
+      const response = await tfetch(
         `PUT /api/video-sets/${intent.name}`,
         `/api/video-sets/${encodeURIComponent(intent.name)}`,
         {
@@ -1552,39 +1569,65 @@ async function applyIntent(intent) {
           body: JSON.stringify(slotStateToVideoSet(slotState)),
         },
       );
+      if (!response.ok) {
+        setStatus(`could not save video set "${intent.name}"`, "error");
+        break;
+      }
       await refreshVideoSetNames();
       break;
+    }
     case "restoreVideoSet": {
       const response = await tfetch(
         `GET /api/video-sets/${intent.name}`,
         `/api/video-sets/${encodeURIComponent(intent.name)}`,
       );
-      if (response.ok) {
-        const videoSet = await response.json();
-        // A synthetic message shaped like a normal /api/videos response, so
-        // applyVideos() (and everything downstream of it -- rebuild(),
-        // saveWall()) needs no special case for where the ids came from.
-        // `source` is what makes resync() stick with this set instead of
-        // re-deriving from search on the next reconnect (see below).
-        applyVideos({
-          query: `named set “${intent.name}”`,
-          video_ids: videoSet.video_ids,
-          reserves: videoSet.reserves,
-          titles: {},
-          from_cache: true,
-          source: { type: "video-set", name: intent.name },
-        });
+      if (!response.ok) {
+        setStatus(`no video set named "${intent.name}"`, "error");
+        break;
       }
+      const videoSet = await response.json();
+      // A synthetic message shaped like a normal /api/videos response, so
+      // applyVideos() (and everything downstream of it -- rebuild(),
+      // saveWall()) needs no special case for where the ids came from.
+      // `source` is what makes resync() stick with this set instead of
+      // re-deriving from search on the next reconnect (see below).
+      applyVideos({
+        query: `named set “${intent.name}”`,
+        video_ids: videoSet.video_ids,
+        reserves: videoSet.reserves,
+        titles: {},
+        from_cache: true,
+        source: { type: "video-set", name: intent.name },
+      });
       break;
     }
-    case "deleteVideoSet":
-      await tfetch(
+    case "deleteVideoSet": {
+      const response = await tfetch(
         `DELETE /api/video-sets/${intent.name}`,
         `/api/video-sets/${encodeURIComponent(intent.name)}`,
         { method: "DELETE" },
       );
+      if (!response.ok) {
+        setStatus(`no video set named "${intent.name}"`, "error");
+        break;
+      }
       await refreshVideoSetNames();
+      // If this wall is currently sticky on the set that was just deleted,
+      // it must not keep showing it forever -- resync() (see below) sticks
+      // with a video-set source on every future reconnect, and that source
+      // now points at nothing. Clear it and re-derive from the live query,
+      // the same way an overriding config-query edit does in the socket
+      // onMessage handler below.
+      const wall = loadWall();
+      if (wall?.source?.type === "video-set" && wall.source.name === intent.name) {
+        wlog(
+          `deleteVideoSet: this wall was sticky on the deleted set ${JSON.stringify(intent.name)} -- clearing it`,
+        );
+        clearWall();
+        resync();
+      }
       break;
+    }
     default:
       wlog(`applyIntent: unknown intent type ${intent.type}`);
       return;
