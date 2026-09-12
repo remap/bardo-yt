@@ -234,6 +234,12 @@ def test_get_a_missing_video_set_is_404(app_env):
         assert client.get("/api/video-sets/nope").status_code == 404
 
 
+def test_delete_a_missing_video_set_is_404(app_env):
+    app, _ = app_env
+    with TestClient(app) as client:
+        assert client.delete("/api/video-sets/nope").status_code == 404
+
+
 def test_delete_a_video_set(app_env):
     app, _ = app_env
     with TestClient(app) as client:
@@ -246,3 +252,16 @@ def test_put_video_set_rejects_invalid_payload_with_422(app_env):
     app, _ = app_env
     with TestClient(app) as client:
         assert client.put("/api/video-sets/n", json={"video_ids": "not a list"}).status_code == 422
+
+
+def test_a_rejected_video_set_put_leaves_an_existing_one_untouched(app_env):
+    """Mirrors gotcha 8's config guarantee for this new resource."""
+    app, store = app_env
+    with TestClient(app) as client:
+        client.put("/api/video-sets/n", json={"video_ids": ["a"]})
+        response = client.put("/api/video-sets/n", json={"video_ids": "not a list"})
+        assert response.status_code == 422
+    from ytmatrix.sets import load_video_set
+
+    saved = asyncio.run(load_video_set(store, "n"))
+    assert saved.video_ids == ["a"]
