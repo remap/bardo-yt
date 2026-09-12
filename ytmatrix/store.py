@@ -46,6 +46,8 @@ class Store(Protocol):
 
     async def list_keys(self, prefix: str) -> list[str]: ...
 
+    async def delete(self, key: str) -> None: ...
+
 
 class FileStore:
     """A Store backed by a directory. Local development and every test.
@@ -107,6 +109,11 @@ class FileStore:
         ]
         return sorted(key for key in keys if key.startswith(prefix))
 
+    async def delete(self, key: str) -> None:
+        # Idempotent: a delete of something already gone is not an error --
+        # the caller only ever wants "this key does not exist afterward".
+        self._path(key).unlink(missing_ok=True)
+
 
 class MemoStore:
     """A Store that answers immutable derived values from memory.
@@ -165,6 +172,13 @@ class MemoStore:
 
     async def list_keys(self, prefix: str) -> list[str]:
         return await self._inner.list_keys(prefix)
+
+    async def delete(self, key: str) -> None:
+        await self._inner.delete(key)
+        # A deleted key must not keep answering from the memo -- eviction,
+        # not just a pass-through, or a re-read of a "deleted" motion/origin
+        # entry would silently resurrect the stale value.
+        self._memo.pop(key, None)
 
 
 def r2_client(
@@ -283,3 +297,6 @@ class R2Store:
                 break
             token = response.get("NextContinuationToken")
         return sorted(keys)
+
+    async def delete(self, key: str) -> None:
+        await asyncio.to_thread(self._client.delete_object, Bucket=self._bucket, Key=key)

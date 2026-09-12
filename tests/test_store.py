@@ -87,6 +87,16 @@ async def test_list_keys_missing_prefix_is_empty(store):
     assert await store.list_keys("nothing/") == []
 
 
+async def test_delete_removes_the_key(store):
+    await store.put("k", b"hello")
+    await store.delete("k")
+    assert await store.get("k") is None
+
+
+async def test_delete_of_a_missing_key_does_not_raise(store):
+    await store.delete("nope.json")
+
+
 # --- R2Store: the conditional-write mechanism itself ---
 #
 # `r2_client` builds a real boto3 S3 client and teaches it, via two botocore
@@ -275,3 +285,21 @@ async def test_memostore_passes_compare_and_swap_straight_through(tmp_path):
     assert await store.put_if_version("_budget.json", b"b", None) is False
     found = await store.get_with_version("_budget.json")
     assert found is not None and found[0] == b"a"
+
+
+async def test_memostore_delete_reaches_the_inner_store(tmp_path):
+    inner = FileStore(tmp_path)
+    store = MemoStore(inner)
+    await store.put("a/b.json", b"{}")
+    await store.delete("a/b.json")
+    assert await inner.get("a/b.json") is None
+
+
+async def test_memostore_delete_evicts_the_memo(tmp_path):
+    """A memoised prefix must not keep serving a value after it is deleted."""
+    inner = FileStore(tmp_path)
+    store = MemoStore(inner)
+    await store.put("motion/abc.json", b'{"score": 12}')
+    assert await store.get("motion/abc.json") == b'{"score": 12}'
+    await store.delete("motion/abc.json")
+    assert await store.get("motion/abc.json") is None
