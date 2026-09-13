@@ -154,5 +154,84 @@ export function resolveLayout(screensData, layoutConfig) {
     }
   }
 
-  return { canvas, totalCells: placements.length, placements };
+  return {
+    canvas,
+    totalCells: placements.length,
+    placements,
+    // Keyed by screen id, for cellTransformStyle -- a per-screen shift/scale
+    // needs each screen's own true pixel boundary to clip against, which a
+    // flat placements list alone does not carry (a screen with zero
+    // resolved cells this round would otherwise have no rect available at
+    // all for its still-configured shift).
+    screenRects: Object.fromEntries(rects.map(({ id, rect }) => [id, rect])),
+  };
+}
+
+/**
+ * Per-cell CSS transform + clip-path for one screen's operator-adjustable
+ * shift/stretch/squish (LayoutConfig.screen_transforms, keyed by screen id).
+ *
+ * The scale is anchored at the SCREEN's own center in absolute canvas
+ * coordinates, not each cell's own center, by pointing transform-origin at
+ * the screen's center expressed in that cell's local box coordinates --
+ * every cell belonging to the same screen therefore scales together as one
+ * rigid block. This deliberately avoids introducing a per-screen wrapper
+ * element: wall-engine.js indexes #grid's children directly and flatly
+ * (gridEl.children[index]) in a few dozen places, and nesting cells under a
+ * screen container would break every one of them.
+ *
+ * clip-path is computed in the cell's own PRE-transform coordinate space,
+ * because clip-path is applied before the transform in the CSS painting
+ * model -- so this inverts the shift+scale to find which pre-transform
+ * positions would land outside the screen's true pixel boundary once
+ * transformed, and clips exactly that much off. A cell fully spilled past
+ * the boundary clamps to a 100% inset (fully clipped) rather than an
+ * inset beyond the box.
+ *
+ * The identity transform (the default -- an unconfigured screen) short-
+ * circuits to "none"/"none": cheaper, and avoids clip-path rounding
+ * artifacts landing a hairline off 0% on an otherwise-untouched screen.
+ */
+export function cellTransformStyle(placement, screenRect, transform) {
+  // snake_case, matching ScreenTransform's own field names (ytmatrix/config.py)
+  // and every other config field at this boundary (offset_x, max_per_screen,
+  // ...) -- this object is the config's screen_transforms[screenId] entry
+  // passed straight through with no renaming, not a JS-side type of its own.
+  const { x: dx = 0, y: dy = 0, scale_x: scaleX = 1, scale_y: scaleY = 1 } = transform ?? {};
+  if (dx === 0 && dy === 0 && scaleX === 1 && scaleY === 1) {
+    return { transform: "none", clipPath: "none" };
+  }
+
+  const anchorX = screenRect.x + screenRect.width / 2;
+  const anchorY = screenRect.y + screenRect.height / 2;
+
+  const pct = (value) => Number(value.toFixed(3));
+  const clamp100 = (value) => Math.min(100, Math.max(0, value));
+
+  const translateXPercent = pct((dx / placement.width) * 100);
+  const translateYPercent = pct((dy / placement.height) * 100);
+  const originXPercent = pct(((anchorX - placement.left) / placement.width) * 100);
+  const originYPercent = pct(((anchorY - placement.top) / placement.height) * 100);
+
+  // Where, in absolute pre-transform canvas coordinates, does the screen's
+  // own boundary come from? Inverting newAbs = anchor + d + scale*(abs - anchor).
+  const leftBoundary = anchorX + (screenRect.x - anchorX - dx) / scaleX;
+  const rightBoundary = anchorX + (screenRect.x + screenRect.width - anchorX - dx) / scaleX;
+  const topBoundary = anchorY + (screenRect.y - anchorY - dy) / scaleY;
+  const bottomBoundary = anchorY + (screenRect.y + screenRect.height - anchorY - dy) / scaleY;
+
+  const leftInset = pct(clamp100(((leftBoundary - placement.left) / placement.width) * 100));
+  const rightInset = pct(
+    clamp100(((placement.left + placement.width - rightBoundary) / placement.width) * 100),
+  );
+  const topInset = pct(clamp100(((topBoundary - placement.top) / placement.height) * 100));
+  const bottomInset = pct(
+    clamp100(((placement.top + placement.height - bottomBoundary) / placement.height) * 100),
+  );
+
+  return {
+    transform: `translate(${translateXPercent}%, ${translateYPercent}%) scale(${scaleX}, ${scaleY})`,
+    transformOrigin: `${originXPercent}% ${originYPercent}%`,
+    clipPath: `inset(${topInset}% ${rightInset}% ${bottomInset}% ${leftInset}%)`,
+  };
 }

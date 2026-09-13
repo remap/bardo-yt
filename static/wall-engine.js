@@ -19,6 +19,8 @@ import {
   IDENTITY_VIEW,
   needsRefetch,
   overridesStoredQuery,
+  viewsToZoomSet,
+  slotStateToVideoSet,
 } from "./grid-logic.js";
 import { connectSocket } from "./socket.js";
 
@@ -158,6 +160,8 @@ const rewindButton = document.getElementById("rewind");
 
 let config = null;
 let slotState = { slots: [], reserves: [] };
+let zoomSetNames = [];
+let videoSetNames = [];
 let players = [];
 let apiReady = false;
 // Set once a `videos` payload has actually been applied. Until then there is
@@ -572,11 +576,16 @@ function buildSnapshot() {
       // page's own cell -- /layout-control positions its rectangle from this
       // directly, so the two pages can never disagree about geometry.
       rect: layout.cellRect ? layout.cellRect(index) : null,
+      // Which physical screen this cell belongs to, so /layout-control can
+      // label it -- `/`'s computeLayout has no concept of screens at all.
+      screenId: layout.screenIdForCell ? layout.screenIdForCell(index) : null,
     };
   });
 
   return {
     type: "snapshot",
+    zoomSets: zoomSetNames,
+    videoSets: videoSetNames,
     global: {
       status: statusEl.textContent,
       statusState: statusEl.dataset.state ?? "",
@@ -591,6 +600,13 @@ function buildSnapshot() {
       newQueryVisible: !newQueryButton.hidden,
       newQueryDisabled: newQueryButton.disabled,
       reservesLeft: slotState.reserves.length,
+      layoutOffset: { x: config.layout?.offset_x ?? 0, y: config.layout?.offset_y ?? 0 },
+      screenTransforms: config.layout?.screen_transforms ?? {},
+      // The FULL screen id list (see layout.allScreenIds's own comment),
+      // not just ids with a currently-resolved cell -- /layout-control
+      // needs a stable row per screen regardless of this instant's video
+      // allocation. `/`'s computeLayout has no such concept.
+      screenIds: layout.allScreenIds ?? [],
     },
     cells,
   };
@@ -950,6 +966,7 @@ async function resync() {
     return;
   }
   config = fetchedConfig;
+  await Promise.all([refreshZoomSetNames(), refreshVideoSetNames()]);
 
   // Seed once. On a later reconnect the button, not the file, is the truth.
   if (!seededMuteFromConfig) {
@@ -992,6 +1009,21 @@ async function resync() {
   // and the wall unrendered.
   const seq = ++applySeq;
   const stored = loadQuery();
+  const remembered = loadWall();
+
+  // A restored video set is sticky: unlike a query-driven wall (below, first
+  // resync of a page load only), this must survive EVERY resync -- including
+  // a later reconnect -- or a routine WebSocket hiccup would silently swap
+  // the operator's named set back for whatever the live query produces.
+  if (remembered?.source?.type === "video-set") {
+    wlog(
+      `resync: sticking with video set ${JSON.stringify(remembered.source.name)} -- ` +
+        "not re-deriving from search",
+    );
+    restoredThisLoad = true;
+    applyVideos(remembered);
+    return;
+  }
 
   // A wall this browser has already been shown is restored as it was, with no
   // request at all. Re-resolving the query was never free -- the search was a
@@ -1004,7 +1036,6 @@ async function resync() {
   // config change, and those exist precisely to go and look.
   if (!restoredThisLoad) {
     restoredThisLoad = true;
-    const remembered = loadWall();
     if (remembered) {
       wlog(
         `restored ${(remembered.video_ids ?? []).filter(Boolean).length} videos from this browser ` +
@@ -1369,6 +1400,20 @@ function applyCellPan(index, dxFraction, dyFraction) {
   applyCoverFit(cell);
 }
 
+// The restore half of a named zoom set: apply one saved view to one cell,
+// the same tail flushZoom already runs after a live wheel step (set the
+// view, refit the iframe, flag whether it counts as "zoomed" for the
+// data-zoomed CSS hook). Cells outside the live cell count, or currently
+// empty, are silently skipped -- a set saved under a different layout total
+// must not throw on the cells it no longer has anything to say about.
+function applyCellView(index, view) {
+  const cell = gridEl.children[index];
+  if (!cell || cell.dataset.empty === "true") return;
+  views.set(index, view);
+  applyCoverFit(cell);
+  cell.dataset.zoomed = view.zoom > 1.001 ? "true" : "false";
+}
+
 function applyCellMenuAction(index, action) {
   switch (action) {
     case "togglePlay":
@@ -1397,6 +1442,16 @@ function applyCellMenuAction(index, action) {
 // message and a local click must produce identical effects, so this is the
 // only place either kind is handled. publishSnapshot() at the end is a no-op
 // unless startWall was given a controlChannel, so every path can call it.
+async function refreshZoomSetNames() {
+  const response = await tfetch("GET /api/zoom-sets", "/api/zoom-sets");
+  zoomSetNames = response.ok ? await response.json() : [];
+}
+
+async function refreshVideoSetNames() {
+  const response = await tfetch("GET /api/video-sets", "/api/video-sets");
+  videoSetNames = response.ok ? await response.json() : [];
+}
+
 async function applyIntent(intent) {
   switch (intent.type) {
     case "play":
@@ -1464,6 +1519,214 @@ async function applyIntent(intent) {
     case "cellMenuAction":
       applyCellMenuAction(intent.index, intent.action);
       break;
+    case "saveZoomSet": {
+      const response = await tfetch(
+        `PUT /api/zoom-sets/${intent.name}`,
+        `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ views: viewsToZoomSet(views) }),
+        },
+      );
+      if (!response.ok) {
+        setStatus(`could not save zoom set "${intent.name}"`, "error");
+        break;
+      }
+      await refreshZoomSetNames();
+      break;
+    }
+    case "restoreZoomSet": {
+      const response = await tfetch(
+        `GET /api/zoom-sets/${intent.name}`,
+        `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
+      );
+      if (!response.ok) {
+        setStatus(`no zoom set named "${intent.name}"`, "error");
+        break;
+      }
+      const zoomSet = await response.json();
+      // A saved set is a whole-wall snapshot, not a patch: reset every live
+      // cell to identity first, so a cell that is zoomed for some OTHER
+      // reason (left over from before this restore) is reset too, not just
+      // merged with whatever the set happens to mention.
+      resetAllViews();
+      for (const [key, view] of Object.entries(zoomSet.views)) {
+        applyCellView(Number(key), view);
+      }
+      break;
+    }
+    case "deleteZoomSet": {
+      const response = await tfetch(
+        `DELETE /api/zoom-sets/${intent.name}`,
+        `/api/zoom-sets/${encodeURIComponent(intent.name)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        setStatus(`no zoom set named "${intent.name}"`, "error");
+        break;
+      }
+      await refreshZoomSetNames();
+      break;
+    }
+    case "saveVideoSet": {
+      const response = await tfetch(
+        `PUT /api/video-sets/${intent.name}`,
+        `/api/video-sets/${encodeURIComponent(intent.name)}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(slotStateToVideoSet(slotState, titles)),
+        },
+      );
+      if (!response.ok) {
+        setStatus(`could not save video set "${intent.name}"`, "error");
+        break;
+      }
+      await refreshVideoSetNames();
+      break;
+    }
+    case "restoreVideoSet": {
+      const response = await tfetch(
+        `GET /api/video-sets/${intent.name}`,
+        `/api/video-sets/${encodeURIComponent(intent.name)}`,
+      );
+      if (!response.ok) {
+        setStatus(`no video set named "${intent.name}"`, "error");
+        break;
+      }
+      const videoSet = await response.json();
+      // A synthetic message shaped like a normal /api/videos response, so
+      // applyVideos() (and everything downstream of it -- rebuild(),
+      // saveWall()) needs no special case for where the ids came from.
+      // `source` is what makes resync() stick with this set instead of
+      // re-deriving from search on the next reconnect (see below).
+      applyVideos({
+        query: `named set “${intent.name}”`,
+        video_ids: videoSet.video_ids,
+        reserves: videoSet.reserves,
+        titles: videoSet.titles ?? {},
+        from_cache: true,
+        source: { type: "video-set", name: intent.name },
+      });
+      break;
+    }
+    case "deleteVideoSet": {
+      const response = await tfetch(
+        `DELETE /api/video-sets/${intent.name}`,
+        `/api/video-sets/${encodeURIComponent(intent.name)}`,
+        { method: "DELETE" },
+      );
+      if (!response.ok) {
+        setStatus(`no video set named "${intent.name}"`, "error");
+        break;
+      }
+      await refreshVideoSetNames();
+      // If this wall is currently sticky on the set that was just deleted,
+      // it must not keep showing it forever -- resync() (see below) sticks
+      // with a video-set source on every future reconnect, and that source
+      // now points at nothing. Clear it and re-derive from the live query,
+      // the same way an overriding config-query edit does in the socket
+      // onMessage handler below.
+      const wall = loadWall();
+      if (wall?.source?.type === "video-set" && wall.source.name === intent.name) {
+        wlog(
+          `deleteVideoSet: this wall was sticky on the deleted set ${JSON.stringify(intent.name)} -- clearing it`,
+        );
+        clearWall();
+        resync();
+      }
+      break;
+    }
+    case "nudgeLayoutOffset": {
+      // Relative to the CURRENT shared config, not to whatever this browser
+      // last rendered -- two operators nudging at once should compose, not
+      // race each other back to a stale base.
+      const currentX = config.layout?.offset_x ?? 0;
+      const currentY = config.layout?.offset_y ?? 0;
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          layout: { offset_x: currentX + intent.dx, offset_y: currentY + intent.dy },
+        }),
+      });
+      if (!response.ok) setStatus("couldn't adjust the layout shift", "error");
+      // No local re-apply here: the PUT's own config broadcast (server.py's
+      // put_config) reaches this same browser over /ws, and the socket
+      // onMessage handler below re-applies containerStyle unconditionally.
+      break;
+    }
+    case "setLayoutOffset": {
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { offset_x: intent.x, offset_y: intent.y } }),
+      });
+      if (!response.ok) setStatus("couldn't adjust the layout shift", "error");
+      break;
+    }
+    // The three per-screen cases below all reconstruct the WHOLE
+    // screen_transforms map before sending it, never just the one touched
+    // screen's entry. server.py's merge_config only merges one level deep
+    // (see ytmatrix/config.py) -- a partial {layout: {screen_transforms:
+    // {F: {...}}}} PUT would silently replace the entire map, wiping out
+    // every other screen's saved shift/scale. Reading the current value out
+    // of `config` (not this browser's own possibly-stale render) so two
+    // operators adjusting different screens at once compose correctly.
+    case "nudgeScreenShift": {
+      const current = config.layout?.screen_transforms?.[intent.screenId] ?? {};
+      const screenTransforms = {
+        ...config.layout?.screen_transforms,
+        [intent.screenId]: {
+          ...current,
+          x: (current.x ?? 0) + intent.dx,
+          y: (current.y ?? 0) + intent.dy,
+        },
+      };
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { screen_transforms: screenTransforms } }),
+      });
+      if (!response.ok) setStatus(`couldn't adjust screen ${intent.screenId}'s shift`, "error");
+      break;
+    }
+    case "nudgeScreenScale": {
+      // Clamped client-side too (server.py's ScreenTransform enforces the
+      // same 0.5-2.0 bound authoritatively) so a rapid-click nudge doesn't
+      // bounce off a rejected PUT right at the edge of the range.
+      const clampScale = (value) => Math.min(2, Math.max(0.5, value));
+      const current = config.layout?.screen_transforms?.[intent.screenId] ?? {};
+      const screenTransforms = {
+        ...config.layout?.screen_transforms,
+        [intent.screenId]: {
+          ...current,
+          scale_x: clampScale((current.scale_x ?? 1) + (intent.dScaleX ?? 0)),
+          scale_y: clampScale((current.scale_y ?? 1) + (intent.dScaleY ?? 0)),
+        },
+      };
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { screen_transforms: screenTransforms } }),
+      });
+      if (!response.ok) setStatus(`couldn't adjust screen ${intent.screenId}'s scale`, "error");
+      break;
+    }
+    case "resetScreenTransform": {
+      const screenTransforms = {
+        ...config.layout?.screen_transforms,
+        [intent.screenId]: { x: 0, y: 0, scale_x: 1, scale_y: 1 },
+      };
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { screen_transforms: screenTransforms } }),
+      });
+      if (!response.ok) setStatus(`couldn't reset screen ${intent.screenId}`, "error");
+      break;
+    }
     default:
       wlog(`applyIntent: unknown intent type ${intent.type}`);
       return;
@@ -1584,6 +1847,10 @@ if (controlChannel) {
   setInterval(publishSnapshot, 1000);
 }
 
+// Exposed for the browser smoke test to assert reconnect behavior directly --
+// socket.js calls exactly this function on every WebSocket (re)connect.
+window.__resync = resync;
+
 connectSocket({
   onReconnect: resync,
   // Config and relayed control intents (POST /api/intent, e.g. from an
@@ -1604,6 +1871,21 @@ connectSocket({
     const change = classifyConfigChange(previous, message.config);
     config = message.config;
     wlog(`config pushed: change=${change}`);
+    // Unconditional, regardless of classifyConfigChange's verdict: a field
+    // that only affects a purely visual property computeLayout derives (e.g.
+    // layout.offset_x/y, layout.screen_transforms) is invisible to
+    // classifyConfigChange's grid/playback key list, and rebuild()/
+    // applyInPlace() are the wrong tool for it anyway -- no need to tear
+    // down players or seek for a shift. Cheap and idempotent: rebuild()
+    // below already does this itself while building cells, so this is a
+    // harmless double-apply in that case.
+    const layout = computeLayout(config);
+    Object.assign(gridEl.style, layout.containerStyle);
+    if (layout.cellRect) {
+      for (const [index, cell] of [...gridEl.children].entries()) {
+        Object.assign(cell.style, layout.cellRect(index));
+      }
+    }
     if (change === "rebuild") rebuild();
     else if (change === "in-place") applyInPlace();
     // Someone typed a query on the config page: that is an explicit

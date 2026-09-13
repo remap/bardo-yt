@@ -26,6 +26,40 @@
     white-space: nowrap; flex: none;
   }
   button:hover { background: #26262d; }
+  .sets-row {
+    display: flex; flex-wrap: wrap; gap: 18px;
+    padding: 6px 14px; border-bottom: 1px solid #26262b; flex: none;
+  }
+  .set-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .set-label { color: #8a8a94; white-space: nowrap; }
+  .sets-row select {
+    font: inherit; padding: 6px 9px; border-radius: 6px; max-width: 160px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+  }
+  .sets-row input[type="text"], .sets-row input[type="number"] {
+    font: inherit; padding: 6px 9px; border-radius: 6px; width: 140px;
+    border: 1px solid #3a3a42; background: #131317; color: #e8e8ea;
+  }
+  .sets-row input[type="text"]:focus, .sets-row input[type="number"]:focus {
+    outline: none; border-color: #5a5a68;
+  }
+  .shift-num { width: 64px !important; }
+  #shift-readout { color: #8a8a94; min-width: 5em; text-align: right; }
+  .screens-row {
+    display: flex; flex-wrap: wrap; gap: 10px 16px;
+    padding: 6px 14px; border-bottom: 1px solid #26262b; flex: none;
+  }
+  .screen-group { display: flex; align-items: center; gap: 3px; }
+  .screen-group .screen-label {
+    color: #8a8a94; font-weight: 600; margin-right: 3px; min-width: 1em;
+  }
+  .screen-group button {
+    font-size: 11px; font-weight: 600; padding: 3px 6px; min-width: 0;
+  }
+  .screen-group .screen-readout {
+    color: #8a8a94; font-size: 11px; min-width: 9em; text-align: right;
+    margin-right: 2px;
+  }
   /* min-width, not 0: this line reports the query, the cache state, the quota
      and every error, and `flex: 1 1 auto; min-width: 0` let it shrink to zero
      width and vanish silently once the header gained one more control. It
@@ -95,6 +129,10 @@
     font-size: 11px; color: #9a9aa4; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
   }
+  .cell .screen-letter {
+    position: absolute; top: 4px; left: 4px;
+    font-size: 11px; font-weight: 700; color: #6f6f7a; pointer-events: none;
+  }
   .cell[data-empty="true"]::after {
     content: "empty"; position: absolute; inset: 0; display: grid;
     place-items: center; color: #55555e; font-size: 12px;
@@ -127,6 +165,37 @@
     <span id="status">loading…</span>
     <a href="/layout">← broadcast</a>
   </header>
+  <div class="sets-row">
+    <div class="set-group">
+      <span class="set-label">Zoom/pan:</span>
+      <select id="zoom-set-select"></select>
+      <button id="zoom-set-restore">Restore</button>
+      <button id="zoom-set-delete">Delete</button>
+      <input id="zoom-set-name" type="text" spellcheck="false" placeholder="name this look">
+      <button id="zoom-set-save">Save</button>
+    </div>
+    <div class="set-group">
+      <span class="set-label">Videos:</span>
+      <select id="video-set-select"></select>
+      <button id="video-set-restore">Restore</button>
+      <button id="video-set-delete">Delete</button>
+      <input id="video-set-name" type="text" spellcheck="false" placeholder="name this set">
+      <button id="video-set-save">Save</button>
+    </div>
+    <div class="set-group">
+      <span class="set-label">Shift:</span>
+      <button id="shift-up" title="Nudge the whole wall up">↑</button>
+      <button id="shift-down" title="Nudge the whole wall down">↓</button>
+      <button id="shift-left" title="Nudge the whole wall left">←</button>
+      <button id="shift-right" title="Nudge the whole wall right">→</button>
+      <span id="shift-readout">0, 0</span>
+      <input id="shift-x" class="shift-num" type="number" step="1" placeholder="x">
+      <input id="shift-y" class="shift-num" type="number" step="1" placeholder="y">
+      <button id="shift-set">Set</button>
+      <button id="shift-reset">Reset</button>
+    </div>
+  </div>
+  <div class="screens-row" id="screens-row"></div>
   <div id="grid"></div>
   <div id="menu" hidden></div>
   <script type="module" src="/static/layout-control.js"></script>

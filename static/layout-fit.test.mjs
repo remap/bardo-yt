@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { screenRectPx, allocateScreenCounts, fitGrid, resolveLayout } from "./layout-fit.js";
+import {
+  screenRectPx,
+  allocateScreenCounts,
+  fitGrid,
+  resolveLayout,
+  cellTransformStyle,
+} from "./layout-fit.js";
 
 test("screenRectPx converts grid units to pixels, matching layout-driver's compute_rect", () => {
   // col*module_size + offset.x, row*module_size + offset.y, cols*module_size, rows*module_size --
@@ -125,12 +131,12 @@ const REAL_SCREENS = {
   module_size: 200,
   layout_offset: { x: 0, y: 0 },
   screens: [
-    { id: "F", name: "Screen F", grid: { col: 0, row: 0, cols: 9, rows: 7 } },
+    { id: "A", name: "Screen A", grid: { col: 9, row: 8, cols: 8, rows: 2 } },
     { id: "B", name: "Screen B", grid: { col: 9, row: 0, cols: 6, rows: 3 } },
     { id: "C", name: "Screen C", grid: { col: 9, row: 3, cols: 6, rows: 3 } },
     { id: "D", name: "Screen D", grid: { col: 9, row: 6, cols: 8, rows: 2 } },
-    { id: "A", name: "Screen A", grid: { col: 9, row: 8, cols: 8, rows: 2 } },
     { id: "E", name: "Screen E", grid: { col: 1, row: 7, cols: 8, rows: 2 } },
+    { id: "F", name: "Screen F", grid: { col: 0, row: 0, cols: 9, rows: 7 } },
   ],
 };
 
@@ -166,12 +172,14 @@ test("resolveLayout skips a screen with zero resolved cells entirely", () => {
 });
 
 test("resolveLayout orders placements screen-by-screen with row-major coordinates within each screen", () => {
+  // screens.json now lists screens A, B, C, D, E, F in that order -- so with
+  // only B and F resolving any cells, B's cell comes first in the flat
+  // placements list, then F's three.
+  // B: 1 cell → fitGrid(1200, 600, 1) = {cols: 1, rows: 1}
+  //   cellWidth=1200, cellHeight=600; B grid offset: x=1800, y=0
   // F: 3 cells → fitGrid(1800, 1400, 3) = {cols: 2, rows: 2}
   //   cellWidth=900, cellHeight=700
   //   row-major order: (0,0), (1,0), (0,1) → left/top pairs: (0,0), (900,0), (0,700)
-  // B: 1 cell → fitGrid(1200, 600, 1) = {cols: 1, rows: 1}
-  //   cellWidth=1200, cellHeight=600
-  //   B grid offset: x=1800, y=0
   const result = resolveLayout(REAL_SCREENS, {
     total: 4,
     max_per_screen: 3,
@@ -179,9 +187,97 @@ test("resolveLayout orders placements screen-by-screen with row-major coordinate
   });
   assert.equal(result.totalCells, 4);
   assert.deepEqual(result.placements, [
+    { screenId: "B", left: 1800, top: 0, width: 1200, height: 600 },
     { screenId: "F", left: 0, top: 0, width: 900, height: 700 },
     { screenId: "F", left: 900, top: 0, width: 900, height: 700 },
     { screenId: "F", left: 0, top: 700, width: 900, height: 700 },
-    { screenId: "B", left: 1800, top: 0, width: 1200, height: 600 },
   ]);
+});
+
+test("resolveLayout also exposes each screen's own pixel rect, for per-screen shift/scale math", () => {
+  const result = resolveLayout(REAL_SCREENS, { total: 8, max_per_screen: 3, screens: {} });
+  assert.deepEqual(result.screenRects.F, { x: 0, y: 0, width: 1800, height: 1400 });
+  assert.deepEqual(result.screenRects.B, { x: 1800, y: 0, width: 1200, height: 600 });
+});
+
+// A single cell exactly filling a 1800x1400 screen at the canvas origin --
+// the simplest fixture for checking the shift/scale/clip math in isolation,
+// independent of resolveLayout's own tiling.
+const WHOLE_SCREEN_CELL = { screenId: "F", left: 0, top: 0, width: 1800, height: 1400 };
+const WHOLE_SCREEN_RECT = { x: 0, y: 0, width: 1800, height: 1400 };
+
+test("cellTransformStyle is a no-op for the identity transform", () => {
+  const style = cellTransformStyle(WHOLE_SCREEN_CELL, WHOLE_SCREEN_RECT, {
+    x: 0,
+    y: 0,
+    scale_x: 1,
+    scale_y: 1,
+  });
+  assert.deepEqual(style, { transform: "none", clipPath: "none" });
+});
+
+test("cellTransformStyle defaults to identity when no transform is given", () => {
+  const style = cellTransformStyle(WHOLE_SCREEN_CELL, WHOLE_SCREEN_RECT, undefined);
+  assert.deepEqual(style, { transform: "none", clipPath: "none" });
+});
+
+test("cellTransformStyle: a pure rightward shift clips the spilling edge, not the revealed edge", () => {
+  // Shift right by 90px = 5% of the 1800px-wide screen. Content that used to
+  // sit at the screen's right edge now sits 90px past it -- that overflow
+  // must be clipped, or it would paint into whatever is physically next to
+  // this screen. The left edge is left un-clipped (nothing spills there; the
+  // reveal is just blank canvas, not something clip-path needs to produce).
+  const style = cellTransformStyle(WHOLE_SCREEN_CELL, WHOLE_SCREEN_RECT, {
+    x: 90,
+    y: 0,
+    scale_x: 1,
+    scale_y: 1,
+  });
+  assert.equal(style.transform, "translate(5%, 0%) scale(1, 1)");
+  assert.equal(style.transformOrigin, "50% 50%");
+  assert.equal(style.clipPath, "inset(0% 5% 0% 0%)");
+});
+
+test("cellTransformStyle: scaling up around the screen's center clips symmetric slivers off both edges", () => {
+  // scaleX=1.2 anchored at the screen's own center (900,700). Inverting the
+  // transform: pre-image of the screen's [0,1800] boundary is x in
+  // [150,1650] -- 150px (1/12 = 8.333%) must be clipped off each side.
+  const style = cellTransformStyle(WHOLE_SCREEN_CELL, WHOLE_SCREEN_RECT, {
+    x: 0,
+    y: 0,
+    scale_x: 1.2,
+    scale_y: 1,
+  });
+  assert.equal(style.transform, "translate(0%, 0%) scale(1.2, 1)");
+  assert.equal(style.transformOrigin, "50% 50%");
+  assert.equal(style.clipPath, "inset(0% 8.333% 0% 8.333%)");
+});
+
+test("cellTransformStyle: shift and scale compose, and clip clamps at 100% when a cell is fully spilled", () => {
+  // A tiny cell sitting right at the screen's own left edge, pushed hard to
+  // the right by both a large shift and upscaling -- entirely spilled past
+  // the screen's right boundary, so the whole thing clips away (100%) rather
+  // than producing a negative or >100% inset.
+  const cell = { screenId: "F", left: 0, top: 0, width: 100, height: 100 };
+  const style = cellTransformStyle(cell, WHOLE_SCREEN_RECT, {
+    x: 2000,
+    y: 0,
+    scale_x: 1,
+    scale_y: 1,
+  });
+  assert.equal(style.clipPath, "inset(0% 100% 0% 0%)");
+});
+
+test("cellTransformStyle: a cell not centered on its screen still uses the screen's center as transform-origin", () => {
+  // Screen B's rect is x:1800..3000, center at 2400. A cell placed at
+  // left=1800 (the screen's own left edge, not its own center) should get an
+  // origin measured from the SCREEN's center relative to the CELL's own box,
+  // not 50%/50% -- that's what makes every cell in the screen scale as one
+  // rigid unit around a shared point instead of each around its own middle.
+  const cell = { screenId: "B", left: 1800, top: 0, width: 600, height: 600 };
+  const screenRect = { x: 1800, y: 0, width: 1200, height: 600 };
+  const style = cellTransformStyle(cell, screenRect, { x: 0, y: 0, scale_x: 1.1, scale_y: 1 });
+  // Screen center x = 2400; cell's own left = 1800, width = 600 -->
+  // (2400-1800)/600*100 = 100%.
+  assert.equal(style.transformOrigin, "100% 50%");
 });

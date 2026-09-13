@@ -284,6 +284,60 @@ def test_layout_accepts_auto_and_none_and_explicit_counts():
     assert layout.screens == {"F": "auto", "D": "none", "C": 2}
     assert layout.total == 8  # default
     assert layout.max_per_screen == 3  # default
+    assert layout.offset_x == 0  # default
+    assert layout.offset_y == 0  # default
+
+
+def test_layout_offset_accepts_negative_values():
+    # A physical-alignment nudge legitimately shifts left/up, unlike total or
+    # max_per_screen -- no lower bound applies here.
+    data = {**VALID, "layout": {"offset_x": -25, "offset_y": -10}}
+    layout = Config.model_validate(data).layout
+    assert layout.offset_x == -25
+    assert layout.offset_y == -10
+
+
+def test_screen_transforms_default_to_empty():
+    layout = Config.model_validate(VALID).layout
+    assert layout is None
+    layout = Config.model_validate({**VALID, "layout": {"screens": {}}}).layout
+    assert layout.screen_transforms == {}
+
+
+def test_screen_transforms_accepts_a_per_screen_shift_and_scale():
+    data = {
+        **VALID,
+        "layout": {"screen_transforms": {"F": {"x": -20, "y": 15, "scale_x": 1.1, "scale_y": 0.9}}},
+    }
+    layout = Config.model_validate(data).layout
+    transform = layout.screen_transforms["F"]
+    assert (transform.x, transform.y) == (-20, 15)
+    assert (transform.scale_x, transform.scale_y) == (1.1, 0.9)
+
+
+def test_screen_transforms_scale_defaults_to_one_and_xy_to_zero():
+    data = {**VALID, "layout": {"screen_transforms": {"F": {}}}}
+    transform = Config.model_validate(data).layout.screen_transforms["F"]
+    assert (transform.x, transform.y) == (0, 0)
+    assert (transform.scale_x, transform.scale_y) == (1.0, 1.0)
+
+
+def test_screen_transforms_rejects_scale_below_the_floor():
+    data = {**VALID, "layout": {"screen_transforms": {"F": {"scale_x": 0.4}}}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(data)
+
+
+def test_screen_transforms_rejects_scale_above_the_ceiling():
+    data = {**VALID, "layout": {"screen_transforms": {"F": {"scale_y": 2.5}}}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(data)
+
+
+def test_screen_transforms_rejects_unknown_keys():
+    data = {**VALID, "layout": {"screen_transforms": {"F": {"rotate": 90}}}}
+    with pytest.raises(ValidationError):
+        Config.model_validate(data)
 
 
 def test_layout_rejects_an_unknown_screen_value():

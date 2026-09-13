@@ -19,6 +19,22 @@ const resetViewButton = document.getElementById("reset-view");
 const shuffleButton = document.getElementById("shuffle");
 const audioEl = document.getElementById("audio");
 const rewindButton = document.getElementById("rewind");
+const zoomSetSelect = document.getElementById("zoom-set-select");
+const zoomSetNameInput = document.getElementById("zoom-set-name");
+const videoSetSelect = document.getElementById("video-set-select");
+const videoSetNameInput = document.getElementById("video-set-name");
+const shiftReadout = document.getElementById("shift-readout");
+const shiftXInput = document.getElementById("shift-x");
+const shiftYInput = document.getElementById("shift-y");
+const screensRowEl = document.getElementById("screens-row");
+
+// Pixels per click -- a physical-alignment nudge is dialed in a few clicks
+// at a time while watching the real NDI output, not computed in advance.
+const LAYOUT_SHIFT_STEP_PX = 10;
+// Same idea, one click at a time while watching the real NDI output, but a
+// multiplicative factor instead of pixels -- 2% is small enough that a
+// stretch/squish correction doesn't overshoot in one click.
+const SCREEN_SCALE_STEP = 0.02;
 
 function send(intent) {
   channel.postMessage(intent);
@@ -66,10 +82,112 @@ let latestCells = [];
 let latestGlobal = {};
 let staleTimer = null;
 
+function renderSetOptions(select, names) {
+  // Rebuilding runs on every snapshot, including the 1s heartbeat -- so if
+  // the name list hasn't actually changed, leave the <option> elements alone.
+  // replaceChildren() unconditionally would visually disrupt a dropdown the
+  // operator currently has open, for no reason at all.
+  const current = [...select.options].map((option) => option.value).join(" ");
+  if (current === names.join(" ")) return;
+
+  const previous = select.value;
+  select.replaceChildren(
+    ...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      option.textContent = name;
+      return option;
+    }),
+  );
+  if (names.includes(previous)) select.value = previous;
+}
+
+// One compact row per screen: 4 shift arrows, 4 stretch/squish buttons, a
+// readout, and a reset -- built once per distinct screen id list (which
+// only ever changes when screens.json itself does, i.e. essentially never)
+// rather than replaced on every snapshot/heartbeat, the same guard
+// renderSetOptions uses above for the same reason.
+let lastScreenIdsKey = "";
+
+function renderScreenRows(screenIds) {
+  const key = screenIds.join(" ");
+  if (key === lastScreenIdsKey) return;
+  lastScreenIdsKey = key;
+
+  screensRowEl.replaceChildren(
+    ...screenIds.map((screenId) => {
+      const group = document.createElement("div");
+      group.className = "screen-group";
+      group.dataset.screenId = screenId;
+
+      const label = document.createElement("span");
+      label.className = "screen-label";
+      label.textContent = screenId;
+      group.appendChild(label);
+
+      const addButton = (glyph, title, onClick) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = glyph;
+        button.title = title;
+        button.addEventListener("click", onClick);
+        group.appendChild(button);
+        return button;
+      };
+
+      const nudgeShift = (dx, dy) => send({ type: "nudgeScreenShift", screenId, dx, dy });
+      const nudgeScale = (dScaleX, dScaleY) =>
+        send({ type: "nudgeScreenScale", screenId, dScaleX, dScaleY });
+
+      addButton("↑", `Nudge screen ${screenId} up`, () => nudgeShift(0, -LAYOUT_SHIFT_STEP_PX));
+      addButton("↓", `Nudge screen ${screenId} down`, () => nudgeShift(0, LAYOUT_SHIFT_STEP_PX));
+      addButton("←", `Nudge screen ${screenId} left`, () => nudgeShift(-LAYOUT_SHIFT_STEP_PX, 0));
+      addButton("→", `Nudge screen ${screenId} right`, () => nudgeShift(LAYOUT_SHIFT_STEP_PX, 0));
+      addButton("W−", `Squish screen ${screenId} narrower`, () =>
+        nudgeScale(-SCREEN_SCALE_STEP, 0),
+      );
+      addButton("W+", `Stretch screen ${screenId} wider`, () => nudgeScale(SCREEN_SCALE_STEP, 0));
+      addButton("H−", `Squish screen ${screenId} shorter`, () =>
+        nudgeScale(0, -SCREEN_SCALE_STEP),
+      );
+      addButton("H+", `Stretch screen ${screenId} taller`, () => nudgeScale(0, SCREEN_SCALE_STEP));
+
+      const readout = document.createElement("span");
+      readout.className = "screen-readout";
+      readout.dataset.readout = "true";
+      group.appendChild(readout);
+
+      addButton("↺", `Reset screen ${screenId}'s shift and scale`, () =>
+        send({ type: "resetScreenTransform", screenId }),
+      );
+
+      return group;
+    }),
+  );
+}
+
+function updateScreenReadouts(screenTransforms) {
+  for (const group of screensRowEl.children) {
+    const screenId = group.dataset.screenId;
+    const transform = screenTransforms?.[screenId] ?? {};
+    const x = transform.x ?? 0;
+    const y = transform.y ?? 0;
+    const scaleX = Math.round((transform.scale_x ?? 1) * 100);
+    const scaleY = Math.round((transform.scale_y ?? 1) * 100);
+    group.querySelector("[data-readout]").textContent = `${x},${y} ${scaleX}%,${scaleY}%`;
+  }
+}
+
 function renderFromSnapshot(snapshot) {
   latestCells = snapshot.cells;
   latestGlobal = snapshot.global;
+  renderSetOptions(zoomSetSelect, snapshot.zoomSets ?? []);
+  renderSetOptions(videoSetSelect, snapshot.videoSets ?? []);
   const g = snapshot.global;
+  const offset = g.layoutOffset ?? { x: 0, y: 0 };
+  shiftReadout.textContent = `${offset.x}, ${offset.y}`;
+  renderScreenRows(g.screenIds ?? []);
+  updateScreenReadouts(g.screenTransforms ?? {});
   if (Date.now() - localStatusAt >= LOCAL_STATUS_HOLD_MS) setStatus(g.status, g.statusState);
   audioEl.textContent = g.audioIndicatorText;
   audioEl.dataset.locked = String(g.audioLocked);
@@ -86,6 +204,9 @@ function renderFromSnapshot(snapshot) {
     for (let i = 0; i < snapshot.cells.length; i += 1) {
       const cell = document.createElement("div");
       cell.className = "cell";
+      const screenLabel = document.createElement("span");
+      screenLabel.className = "screen-letter";
+      cell.appendChild(screenLabel);
       const label = document.createElement("span");
       label.className = "label";
       cell.appendChild(label);
@@ -102,6 +223,7 @@ function renderFromSnapshot(snapshot) {
     if (cellData.videoId) cell.dataset.videoId = cellData.videoId;
     else delete cell.dataset.videoId;
     cell.querySelector(".label").textContent = cellData.title ?? "";
+    cell.querySelector(".screen-letter").textContent = cellData.screenId ?? "";
   });
 
   clearTimeout(staleTimer);
@@ -143,6 +265,77 @@ newQueryButton.addEventListener("click", () => {
   newQueryButton.disabled = true;
   send({ type: "newQuery", prompt: prompt || null });
 });
+
+document.getElementById("zoom-set-save").addEventListener("click", () => {
+  const name = zoomSetNameInput.value.trim();
+  if (!name) return;
+  // PUT /api/zoom-sets/{name} takes name as a single URL path segment -- a
+  // literal "/" would 404 there, silently, after the input has already been
+  // cleared below. Reject it here instead of losing the save without a trace.
+  if (name.includes("/")) {
+    setLocalStatus(`set names can't contain "/"`, "error");
+    return;
+  }
+  send({ type: "saveZoomSet", name });
+  zoomSetNameInput.value = "";
+});
+document.getElementById("zoom-set-restore").addEventListener("click", () => {
+  if (zoomSetSelect.value) send({ type: "restoreZoomSet", name: zoomSetSelect.value });
+});
+document.getElementById("zoom-set-delete").addEventListener("click", () => {
+  if (zoomSetSelect.value) send({ type: "deleteZoomSet", name: zoomSetSelect.value });
+});
+
+document.getElementById("video-set-save").addEventListener("click", () => {
+  const name = videoSetNameInput.value.trim();
+  if (!name) return;
+  // Same restriction as the zoom-set save button above: PUT /api/video-sets/{name}
+  // is a single URL path segment.
+  if (name.includes("/")) {
+    setLocalStatus(`set names can't contain "/"`, "error");
+    return;
+  }
+  send({ type: "saveVideoSet", name });
+  videoSetNameInput.value = "";
+});
+document.getElementById("video-set-restore").addEventListener("click", () => {
+  if (videoSetSelect.value) send({ type: "restoreVideoSet", name: videoSetSelect.value });
+});
+document.getElementById("video-set-delete").addEventListener("click", () => {
+  if (videoSetSelect.value) send({ type: "deleteVideoSet", name: videoSetSelect.value });
+});
+
+document.getElementById("shift-up").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: 0, dy: -LAYOUT_SHIFT_STEP_PX }),
+);
+document.getElementById("shift-down").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: 0, dy: LAYOUT_SHIFT_STEP_PX }),
+);
+document.getElementById("shift-left").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: -LAYOUT_SHIFT_STEP_PX, dy: 0 }),
+);
+document.getElementById("shift-right").addEventListener("click", () =>
+  send({ type: "nudgeLayoutOffset", dx: LAYOUT_SHIFT_STEP_PX, dy: 0 }),
+);
+document.getElementById("shift-set").addEventListener("click", () => {
+  const x = Number.parseInt(shiftXInput.value, 10);
+  const y = Number.parseInt(shiftYInput.value, 10);
+  // An input left blank (or non-numeric) means "leave that axis alone" --
+  // parseInt("", 10) is NaN, and falling back to the current readout value
+  // (rather than 0) is what makes typing just an x, with y left blank, do
+  // the obviously-intended thing instead of resetting y to zero.
+  const [currentX, currentY] = shiftReadout.textContent.split(", ").map(Number);
+  send({
+    type: "setLayoutOffset",
+    x: Number.isFinite(x) ? x : currentX,
+    y: Number.isFinite(y) ? y : currentY,
+  });
+  shiftXInput.value = "";
+  shiftYInput.value = "";
+});
+document.getElementById("shift-reset").addEventListener("click", () =>
+  send({ type: "setLayoutOffset", x: 0, y: 0 }),
+);
 
 function cellIndexOf(target) {
   const cell = target.closest(".cell");

@@ -311,3 +311,43 @@ export function needsRefetch(previous, next, totalCellsFor = (config) => cellCou
 export function overridesStoredQuery(previous, next) {
   return Boolean(previous) && differs(previous, next, "query");
 }
+
+// --- named zoom/pan sets -----------------------------------------------
+//
+// A saved set is a whole-wall snapshot: every cell's view at once, under one
+// name (not a per-cell library). Keyed by cell index because `views` already
+// is (wall-engine.js) -- JSON object keys are always strings, so this is
+// just the string/number boundary, not a format decision.
+export function viewsToZoomSet(views) {
+  const out = {};
+  for (const [index, view] of views.entries()) {
+    out[String(index)] = { zoom: view.zoom, offsetX: view.offsetX, offsetY: view.offsetY };
+  }
+  return out;
+}
+
+// --- named video sets ----------------------------------------------------
+//
+// Whatever is on screen right now, visible and spare -- independent of
+// whatever search produced it, so it can be restored later even if search
+// would no longer turn up the same clips. Empty cells (null) are dropped:
+// they are `splitSlots`'s own padding, not a video to remember.
+//
+// `titles` travels with the set (not just video_ids/reserves) because a
+// restore has no search response to pull titles from -- applyVideos()'s
+// only source of a title is the `titles` field on the message it's given,
+// and a synthetic restore message has no query behind it at all. Without
+// this, a restored set fell back to showing each cell's raw video id where
+// its title belongs. `titles` is whatever Map-like object the caller's own
+// title cache is (wall-engine.js's `titles`); an id with no known title is
+// simply omitted rather than stored as null/undefined.
+export function slotStateToVideoSet(slotState, titles = new Map()) {
+  const videoIds = slotState.slots.filter(Boolean);
+  const reserves = [...slotState.reserves];
+  const capturedTitles = {};
+  for (const id of new Set([...videoIds, ...reserves])) {
+    const title = titles.get(id);
+    if (title != null) capturedTitles[id] = title;
+  }
+  return { video_ids: videoIds, reserves, titles: capturedTitles };
+}

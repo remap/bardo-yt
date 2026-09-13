@@ -26,6 +26,8 @@ import {
   IDENTITY_VIEW,
   needsRefetch,
   overridesStoredQuery,
+  viewsToZoomSet,
+  slotStateToVideoSet,
 } from "./grid-logic.js";
 
 test("videoUrl includes the timestamp in whole seconds", () => {
@@ -743,4 +745,55 @@ test("an edited config query overrides whatever the browser was watching", () =>
 test("an unchanged config query leaves the browser's own query alone", () => {
   const config = { query: "a", search: { order: "date" }, grid: { cols: 4, rows: 2 } };
   assert.equal(overridesStoredQuery(config, { ...config, search: { order: "relevance" } }), false);
+});
+
+test("viewsToZoomSet converts a views Map to a plain, string-keyed object", () => {
+  const views = new Map([
+    [0, { zoom: 1.4, offsetX: 12, offsetY: -8 }],
+    [3, { zoom: 1, offsetX: 0, offsetY: 0 }],
+  ]);
+  assert.deepEqual(viewsToZoomSet(views), {
+    "0": { zoom: 1.4, offsetX: 12, offsetY: -8 },
+    "3": { zoom: 1, offsetX: 0, offsetY: 0 },
+  });
+});
+
+test("viewsToZoomSet on an empty Map is an empty object", () => {
+  assert.deepEqual(viewsToZoomSet(new Map()), {});
+});
+
+test("slotStateToVideoSet captures slots and reserves, dropping empty cells", () => {
+  const slotState = { slots: ["a", null, "b"], reserves: ["c", "d"] };
+  assert.deepEqual(slotStateToVideoSet(slotState), {
+    video_ids: ["a", "b"],
+    reserves: ["c", "d"],
+    titles: {},
+  });
+});
+
+test("slotStateToVideoSet does not alias the original reserves array", () => {
+  const slotState = { slots: ["a"], reserves: ["c"] };
+  const videoSet = slotStateToVideoSet(slotState);
+  videoSet.reserves.push("z");
+  assert.deepEqual(slotState.reserves, ["c"]);
+});
+
+test("slotStateToVideoSet captures a title for every known slot and reserve id", () => {
+  const slotState = { slots: ["a", null, "b"], reserves: ["c"] };
+  const titles = new Map([
+    ["a", "Video A"],
+    ["b", "Video B"],
+    ["c", "Video C"],
+  ]);
+  assert.deepEqual(slotStateToVideoSet(slotState, titles).titles, {
+    a: "Video A",
+    b: "Video B",
+    c: "Video C",
+  });
+});
+
+test("slotStateToVideoSet omits an id with no known title rather than storing null", () => {
+  const slotState = { slots: ["a", "b"], reserves: [] };
+  const titles = new Map([["a", "Video A"]]);
+  assert.deepEqual(slotStateToVideoSet(slotState, titles).titles, { a: "Video A" });
 });

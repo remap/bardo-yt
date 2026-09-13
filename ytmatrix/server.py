@@ -24,6 +24,18 @@ from ytmatrix import (
 )
 from ytmatrix.config import DEFAULT_CONFIG_PATH, Config, load_config, merge_config, save_config
 from ytmatrix.derived import DerivedIndex
+from ytmatrix.sets import (
+    VideoSetPayload,
+    ZoomSetPayload,
+    delete_video_set,
+    delete_zoom_set,
+    list_video_set_names,
+    list_zoom_set_names,
+    load_video_set,
+    load_zoom_set,
+    save_video_set,
+    save_zoom_set,
+)
 from ytmatrix.settings import Settings
 from ytmatrix.store import MemoStore, Store
 from ytmatrix.ws import ConnectionManager
@@ -654,6 +666,64 @@ def create_app(
         # whether the change means it has to refetch, and whether a hand-typed
         # config query should override the one it had stored.
         await manager.broadcast({"type": "config", "config": new_config.model_dump(mode="json")})
+        return {"status": "ok"}
+
+    @app.get("/api/zoom-sets")
+    async def list_zoom_sets_route() -> list[str]:
+        return await list_zoom_set_names(store)
+
+    @app.get("/api/zoom-sets/{name}")
+    async def get_zoom_set_route(name: str) -> dict:
+        zoom_set = await load_zoom_set(store, name)
+        if zoom_set is None:
+            raise HTTPException(status_code=404, detail=f"no zoom set named {name!r}")
+        return zoom_set.model_dump(mode="json")
+
+    @app.put("/api/zoom-sets/{name}")
+    async def put_zoom_set_route(name: str, payload: dict) -> dict:
+        try:
+            validated = ZoomSetPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=exc.errors(include_url=False, include_context=False),
+            ) from exc
+        await save_zoom_set(store, name, validated)
+        return {"status": "ok"}
+
+    @app.delete("/api/zoom-sets/{name}")
+    async def delete_zoom_set_route(name: str) -> dict:
+        if not await delete_zoom_set(store, name):
+            raise HTTPException(status_code=404, detail=f"no zoom set named {name!r}")
+        return {"status": "ok"}
+
+    @app.get("/api/video-sets")
+    async def list_video_sets_route() -> list[str]:
+        return await list_video_set_names(store)
+
+    @app.get("/api/video-sets/{name}")
+    async def get_video_set_route(name: str) -> dict:
+        video_set = await load_video_set(store, name)
+        if video_set is None:
+            raise HTTPException(status_code=404, detail=f"no video set named {name!r}")
+        return video_set.model_dump(mode="json")
+
+    @app.put("/api/video-sets/{name}")
+    async def put_video_set_route(name: str, payload: dict) -> dict:
+        try:
+            validated = VideoSetPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=exc.errors(include_url=False, include_context=False),
+            ) from exc
+        await save_video_set(store, name, validated)
+        return {"status": "ok"}
+
+    @app.delete("/api/video-sets/{name}")
+    async def delete_video_set_route(name: str) -> dict:
+        if not await delete_video_set(store, name):
+            raise HTTPException(status_code=404, detail=f"no video set named {name!r}")
         return {"status": "ok"}
 
     @app.post("/api/cache-status")
