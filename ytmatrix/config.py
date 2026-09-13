@@ -141,6 +141,22 @@ class QuotaConfig(Strict):
     daily_limit_units: int = Field(default=5000, ge=0)
 
 
+class ScreenTransform(Strict):
+    """One screen's operator-adjustable shift/stretch/squish.
+
+    Purely a validated set of numbers -- static/layout-fit.js's
+    cellTransformStyle is what actually turns this into a per-cell CSS
+    transform + clip-path, anchoring scale at the screen's own center. The
+    scale bounds (0.5-2.0) exist so a fat-fingered value can't collapse a
+    screen to nothing or blow it up past any plausible correction.
+    """
+
+    x: int = 0
+    y: int = 0
+    scale_x: float = Field(default=1.0, ge=0.5, le=2.0)
+    scale_y: float = Field(default=1.0, ge=0.5, le=2.0)
+
+
 class LayoutConfig(Strict):
     """Per-screen video counts for the /layout front end.
 
@@ -167,6 +183,13 @@ class LayoutConfig(Strict):
     # per-cell math at all.
     offset_x: int = 0
     offset_y: int = 0
+    # Per-screen shift/stretch/squish, additive to and fully independent of
+    # offset_x/offset_y above -- see ScreenTransform and
+    # static/layout-fit.js's cellTransformStyle, which is where this
+    # actually gets turned into a per-cell CSS transform + clip-path. A
+    # screen id absent here means "untouched" (identity transform), not
+    # "explicitly reset to zero" -- same convention as `screens` above.
+    screen_transforms: dict[str, ScreenTransform] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _explicit_counts_fit_the_budget(self) -> LayoutConfig:

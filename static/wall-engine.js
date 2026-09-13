@@ -576,6 +576,9 @@ function buildSnapshot() {
       // page's own cell -- /layout-control positions its rectangle from this
       // directly, so the two pages can never disagree about geometry.
       rect: layout.cellRect ? layout.cellRect(index) : null,
+      // Which physical screen this cell belongs to, so /layout-control can
+      // label it -- `/`'s computeLayout has no concept of screens at all.
+      screenId: layout.screenIdForCell ? layout.screenIdForCell(index) : null,
     };
   });
 
@@ -598,6 +601,12 @@ function buildSnapshot() {
       newQueryDisabled: newQueryButton.disabled,
       reservesLeft: slotState.reserves.length,
       layoutOffset: { x: config.layout?.offset_x ?? 0, y: config.layout?.offset_y ?? 0 },
+      screenTransforms: config.layout?.screen_transforms ?? {},
+      // The FULL screen id list (see layout.allScreenIds's own comment),
+      // not just ids with a currently-resolved cell -- /layout-control
+      // needs a stable row per screen regardless of this instant's video
+      // allocation. `/`'s computeLayout has no such concept.
+      screenIds: layout.allScreenIds ?? [],
     },
     cells,
   };
@@ -1567,7 +1576,7 @@ async function applyIntent(intent) {
         {
           method: "PUT",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(slotStateToVideoSet(slotState)),
+          body: JSON.stringify(slotStateToVideoSet(slotState, titles)),
         },
       );
       if (!response.ok) {
@@ -1596,7 +1605,7 @@ async function applyIntent(intent) {
         query: `named set “${intent.name}”`,
         video_ids: videoSet.video_ids,
         reserves: videoSet.reserves,
-        titles: {},
+        titles: videoSet.titles ?? {},
         from_cache: true,
         source: { type: "video-set", name: intent.name },
       });
@@ -1655,6 +1664,67 @@ async function applyIntent(intent) {
         body: JSON.stringify({ layout: { offset_x: intent.x, offset_y: intent.y } }),
       });
       if (!response.ok) setStatus("couldn't adjust the layout shift", "error");
+      break;
+    }
+    // The three per-screen cases below all reconstruct the WHOLE
+    // screen_transforms map before sending it, never just the one touched
+    // screen's entry. server.py's merge_config only merges one level deep
+    // (see ytmatrix/config.py) -- a partial {layout: {screen_transforms:
+    // {F: {...}}}} PUT would silently replace the entire map, wiping out
+    // every other screen's saved shift/scale. Reading the current value out
+    // of `config` (not this browser's own possibly-stale render) so two
+    // operators adjusting different screens at once compose correctly.
+    case "nudgeScreenShift": {
+      const current = config.layout?.screen_transforms?.[intent.screenId] ?? {};
+      const screenTransforms = {
+        ...config.layout?.screen_transforms,
+        [intent.screenId]: {
+          ...current,
+          x: (current.x ?? 0) + intent.dx,
+          y: (current.y ?? 0) + intent.dy,
+        },
+      };
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { screen_transforms: screenTransforms } }),
+      });
+      if (!response.ok) setStatus(`couldn't adjust screen ${intent.screenId}'s shift`, "error");
+      break;
+    }
+    case "nudgeScreenScale": {
+      // Clamped client-side too (server.py's ScreenTransform enforces the
+      // same 0.5-2.0 bound authoritatively) so a rapid-click nudge doesn't
+      // bounce off a rejected PUT right at the edge of the range.
+      const clampScale = (value) => Math.min(2, Math.max(0.5, value));
+      const current = config.layout?.screen_transforms?.[intent.screenId] ?? {};
+      const screenTransforms = {
+        ...config.layout?.screen_transforms,
+        [intent.screenId]: {
+          ...current,
+          scale_x: clampScale((current.scale_x ?? 1) + (intent.dScaleX ?? 0)),
+          scale_y: clampScale((current.scale_y ?? 1) + (intent.dScaleY ?? 0)),
+        },
+      };
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { screen_transforms: screenTransforms } }),
+      });
+      if (!response.ok) setStatus(`couldn't adjust screen ${intent.screenId}'s scale`, "error");
+      break;
+    }
+    case "resetScreenTransform": {
+      const screenTransforms = {
+        ...config.layout?.screen_transforms,
+        [intent.screenId]: { x: 0, y: 0, scale_x: 1, scale_y: 1 },
+      };
+      const response = await tfetch("PUT /api/config", "/api/config", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ layout: { screen_transforms: screenTransforms } }),
+      });
+      if (!response.ok) setStatus(`couldn't reset screen ${intent.screenId}`, "error");
       break;
     }
     default:
@@ -1803,12 +1873,19 @@ connectSocket({
     wlog(`config pushed: change=${change}`);
     // Unconditional, regardless of classifyConfigChange's verdict: a field
     // that only affects a purely visual property computeLayout derives (e.g.
-    // layout.offset_x/y) is invisible to classifyConfigChange's grid/playback
-    // key list, and rebuild()/applyInPlace() are the wrong tool for it anyway
-    // -- no need to tear down players or seek for a shift. Cheap and
-    // idempotent: rebuild() below already does this itself while building
-    // cells, so this is a harmless double-apply in that case.
-    Object.assign(gridEl.style, computeLayout(config).containerStyle);
+    // layout.offset_x/y, layout.screen_transforms) is invisible to
+    // classifyConfigChange's grid/playback key list, and rebuild()/
+    // applyInPlace() are the wrong tool for it anyway -- no need to tear
+    // down players or seek for a shift. Cheap and idempotent: rebuild()
+    // below already does this itself while building cells, so this is a
+    // harmless double-apply in that case.
+    const layout = computeLayout(config);
+    Object.assign(gridEl.style, layout.containerStyle);
+    if (layout.cellRect) {
+      for (const [index, cell] of [...gridEl.children].entries()) {
+        Object.assign(cell.style, layout.cellRect(index));
+      }
+    }
     if (change === "rebuild") rebuild();
     else if (change === "in-place") applyInPlace();
     // Someone typed a query on the config page: that is an explicit

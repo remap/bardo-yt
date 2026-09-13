@@ -45,6 +45,21 @@
   }
   .shift-num { width: 64px !important; }
   #shift-readout { color: #8a8a94; min-width: 5em; text-align: right; }
+  .screens-row {
+    display: flex; flex-wrap: wrap; gap: 10px 16px;
+    padding: 6px 14px; border-bottom: 1px solid #26262b; flex: none;
+  }
+  .screen-group { display: flex; align-items: center; gap: 3px; }
+  .screen-group .screen-label {
+    color: #8a8a94; font-weight: 600; margin-right: 3px; min-width: 1em;
+  }
+  .screen-group button {
+    font-size: 11px; font-weight: 600; padding: 3px 6px; min-width: 0;
+  }
+  .screen-group .screen-readout {
+    color: #8a8a94; font-size: 11px; min-width: 9em; text-align: right;
+    margin-right: 2px;
+  }
   /* min-width, not 0: this line reports the query, the cache state, the quota
      and every error, and `flex: 1 1 auto; min-width: 0` let it shrink to zero
      width and vanish silently once the header gained one more control. It
@@ -114,6 +129,10 @@
     font-size: 11px; color: #9a9aa4; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; pointer-events: none;
   }
+  .cell .screen-letter {
+    position: absolute; top: 4px; left: 4px;
+    font-size: 11px; font-weight: 700; color: #6f6f7a; pointer-events: none;
+  }
   .cell[data-empty="true"]::after {
     content: "empty"; position: absolute; inset: 0; display: grid;
     place-items: center; color: #55555e; font-size: 12px;
@@ -176,6 +195,7 @@
       <button id="shift-reset">Reset</button>
     </div>
   </div>
+  <div class="screens-row" id="screens-row"></div>
   <div id="grid"></div>
   <div id="menu" hidden></div>
   <script type="module" src="/static/layout-control.js"></script>

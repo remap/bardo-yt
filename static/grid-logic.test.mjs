@@ -767,6 +767,7 @@ test("slotStateToVideoSet captures slots and reserves, dropping empty cells", ()
   assert.deepEqual(slotStateToVideoSet(slotState), {
     video_ids: ["a", "b"],
     reserves: ["c", "d"],
+    titles: {},
   });
 });
 
@@ -775,4 +776,24 @@ test("slotStateToVideoSet does not alias the original reserves array", () => {
   const videoSet = slotStateToVideoSet(slotState);
   videoSet.reserves.push("z");
   assert.deepEqual(slotState.reserves, ["c"]);
+});
+
+test("slotStateToVideoSet captures a title for every known slot and reserve id", () => {
+  const slotState = { slots: ["a", null, "b"], reserves: ["c"] };
+  const titles = new Map([
+    ["a", "Video A"],
+    ["b", "Video B"],
+    ["c", "Video C"],
+  ]);
+  assert.deepEqual(slotStateToVideoSet(slotState, titles).titles, {
+    a: "Video A",
+    b: "Video B",
+    c: "Video C",
+  });
+});
+
+test("slotStateToVideoSet omits an id with no known title rather than storing null", () => {
+  const slotState = { slots: ["a", "b"], reserves: [] };
+  const titles = new Map([["a", "Video A"]]);
+  assert.deepEqual(slotStateToVideoSet(slotState, titles).titles, { a: "Video A" });
 });

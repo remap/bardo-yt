@@ -332,9 +332,22 @@ export function viewsToZoomSet(views) {
 // whatever search produced it, so it can be restored later even if search
 // would no longer turn up the same clips. Empty cells (null) are dropped:
 // they are `splitSlots`'s own padding, not a video to remember.
-export function slotStateToVideoSet(slotState) {
-  return {
-    video_ids: slotState.slots.filter(Boolean),
-    reserves: [...slotState.reserves],
-  };
+//
+// `titles` travels with the set (not just video_ids/reserves) because a
+// restore has no search response to pull titles from -- applyVideos()'s
+// only source of a title is the `titles` field on the message it's given,
+// and a synthetic restore message has no query behind it at all. Without
+// this, a restored set fell back to showing each cell's raw video id where
+// its title belongs. `titles` is whatever Map-like object the caller's own
+// title cache is (wall-engine.js's `titles`); an id with no known title is
+// simply omitted rather than stored as null/undefined.
+export function slotStateToVideoSet(slotState, titles = new Map()) {
+  const videoIds = slotState.slots.filter(Boolean);
+  const reserves = [...slotState.reserves];
+  const capturedTitles = {};
+  for (const id of new Set([...videoIds, ...reserves])) {
+    const title = titles.get(id);
+    if (title != null) capturedTitles[id] = title;
+  }
+  return { video_ids: videoIds, reserves, titles: capturedTitles };
 }

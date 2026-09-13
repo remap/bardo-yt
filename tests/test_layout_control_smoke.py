@@ -310,6 +310,13 @@ def test_save_and_restore_zoom_and_video_sets(running_server):
         before_ids = broadcast.evaluate(
             "[...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)"
         )
+        # The control page is what actually renders a title (/layout has no
+        # .label at all -- it draws real iframes, not plain rectangles), so
+        # this is the only place a lost title would be observable.
+        before_titles = control.evaluate(
+            "[...document.querySelectorAll('.cell')].map(c => c.querySelector('.label').textContent)"
+        )
+        assert all(before_titles), "fixture videos must all have a resolvable title to start"
         control.fill("#video-set-name", "finale")
         control.click("#video-set-save")
         control.wait_for_function(
@@ -326,6 +333,17 @@ def test_save_and_restore_zoom_and_video_sets(running_server):
             "ids => JSON.stringify([...document.querySelectorAll('.cell')].map(c => c.dataset.videoId)) === JSON.stringify(ids)",
             arg=before_ids,
             timeout=15_000,
+        )
+        # Titles must come back too, not just ids -- a restored set has no
+        # search response to pull titles from, so this is what proves
+        # slotStateToVideoSet's captured titles actually round-tripped
+        # through the saved set rather than silently falling back to
+        # showing each cell's raw video id.
+        control.wait_for_function(
+            "titles => JSON.stringify([...document.querySelectorAll('.cell')]"
+            ".map(c => c.querySelector('.label').textContent)) === JSON.stringify(titles)",
+            arg=before_titles,
+            timeout=10_000,
         )
         browser.close()
 
@@ -474,6 +492,111 @@ def test_global_layout_shift_from_the_control_page(running_server):
         control.click("#shift-reset")
         broadcast.wait_for_function(
             "document.getElementById('grid').style.transform === 'translate(0px, 0px)'",
+            timeout=10_000,
+        )
+        browser.close()
+
+
+def test_per_screen_shift_and_scale_from_the_control_page(running_server):
+    """Nudging one screen's shift/scale lands on that screen's own cells as a
+    per-cell transform + clip-path -- and, critically, must NOT touch a
+    sibling screen's cells at all (that isolation, not the exact pixel math
+    already covered by static/layout-fit.test.mjs, is what a browser test is
+    for here). screens.json lists screens A, B, C, D, E, F in that order, so
+    under the default layout config screen A's one cell is at index 0 and
+    screen F's three cells are at indices 5-7 -- see layout-fit.test.mjs's
+    "produces 8 cells across the six real screens".
+    """
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--autoplay-policy=no-user-gesture-required"])
+        context = browser.new_context(ignore_https_errors=True)
+        broadcast = context.new_page()
+        control = context.new_page()
+
+        broadcast.goto(f"{running_server}/layout", wait_until="load")
+        broadcast.wait_for_function("window.__prerolled === true", timeout=40_000)
+        control.goto(f"{running_server}/layout-control", wait_until="load")
+        control.wait_for_selector('.cell[data-empty="false"]', timeout=20_000)
+        control.wait_for_selector('.screen-group[data-screen-id="F"]', timeout=10_000)
+
+        def cell_style(page, index, prop):
+            return page.evaluate(f"document.querySelectorAll('.cell')[{index}].style.{prop}")
+
+        def readout(screen_id):
+            return control.locator(
+                f'.screen-group[data-screen-id="{screen_id}"] [data-readout]'
+            ).text_content()
+
+        def readout_selector(screen_id):
+            return f'.screen-group[data-screen-id="{screen_id}"] [data-readout]'
+
+        # Each cell on the control page is labelled with its own screen's
+        # letter -- index 0 is screen A's only cell, index 5 the first of
+        # screen F's three.
+        assert (
+            control.evaluate(
+                "document.querySelectorAll('.cell')[0].querySelector('.screen-letter').textContent"
+            )
+            == "A"
+        )
+        assert (
+            control.evaluate(
+                "document.querySelectorAll('.cell')[5].querySelector('.screen-letter').textContent"
+            )
+            == "F"
+        )
+
+        # Both pages agree: nothing shifted or scaled yet, on either screen.
+        assert cell_style(broadcast, 5, "transform") == "none"
+        assert cell_style(broadcast, 0, "transform") == "none"
+        assert cell_style(control, 5, "transform") == "none"
+        assert readout("F") == "0,0 100%,100%"
+        assert readout("A") == "0,0 100%,100%"
+
+        screen_f = control.locator('.screen-group[data-screen-id="F"]')
+        screen_f.get_by_title("Nudge screen F right").click()
+        control.wait_for_function(
+            f"document.querySelector('{readout_selector('F')}').textContent === '10,0 100%,100%'",
+            timeout=10_000,
+        )
+        broadcast.wait_for_function(
+            "document.querySelectorAll('.cell')[5].style.transform !== 'none'", timeout=10_000
+        )
+        control.wait_for_function(
+            "document.querySelectorAll('.cell')[5].style.transform !== 'none'", timeout=10_000
+        )
+        # Screen A, untouched, must show no effect at all on either page.
+        assert cell_style(broadcast, 0, "transform") == "none"
+        assert cell_style(control, 0, "transform") == "none"
+        assert readout("A") == "0,0 100%,100%"
+
+        screen_f.get_by_title("Stretch screen F wider").click()
+        # Waiting on the readout itself, not on clipPath going non-"none": a
+        # plain shift on a cell that is only ONE quadrant of its screen (F
+        # tiles 2x2) already produces a non-"none" clip-path -- "inset(0% 0%
+        # 0% 0%)" is a real, distinct string from "none" even when every
+        # inset is zero -- so that condition was already true from the
+        # previous step and would race ahead of this click's own PUT.
+        control.wait_for_function(
+            "document.querySelector('.screen-group[data-screen-id=\"F\"] [data-readout]')"
+            ".textContent === '10,0 102%,100%'",
+            timeout=10_000,
+        )
+        broadcast.wait_for_function(
+            "document.querySelectorAll('.cell')[5].style.transform.includes('scale(1.02')",
+            timeout=10_000,
+        )
+        assert cell_style(broadcast, 0, "clipPath") == "none"
+        assert readout("A") == "0,0 100%,100%"
+
+        screen_f.get_by_title("Reset screen F's shift and scale").click()
+        control.wait_for_function(
+            f"document.querySelector('{readout_selector('F')}').textContent === '0,0 100%,100%'",
+            timeout=10_000,
+        )
+        broadcast.wait_for_function(
+            "document.querySelectorAll('.cell')[5].style.transform === 'none' && "
+            "document.querySelectorAll('.cell')[5].style.clipPath === 'none'",
             timeout=10_000,
         )
         browser.close()

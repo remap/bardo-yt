@@ -26,10 +26,15 @@ const videoSetNameInput = document.getElementById("video-set-name");
 const shiftReadout = document.getElementById("shift-readout");
 const shiftXInput = document.getElementById("shift-x");
 const shiftYInput = document.getElementById("shift-y");
+const screensRowEl = document.getElementById("screens-row");
 
 // Pixels per click -- a physical-alignment nudge is dialed in a few clicks
 // at a time while watching the real NDI output, not computed in advance.
 const LAYOUT_SHIFT_STEP_PX = 10;
+// Same idea, one click at a time while watching the real NDI output, but a
+// multiplicative factor instead of pixels -- 2% is small enough that a
+// stretch/squish correction doesn't overshoot in one click.
+const SCREEN_SCALE_STEP = 0.02;
 
 function send(intent) {
   channel.postMessage(intent);
@@ -97,6 +102,82 @@ function renderSetOptions(select, names) {
   if (names.includes(previous)) select.value = previous;
 }
 
+// One compact row per screen: 4 shift arrows, 4 stretch/squish buttons, a
+// readout, and a reset -- built once per distinct screen id list (which
+// only ever changes when screens.json itself does, i.e. essentially never)
+// rather than replaced on every snapshot/heartbeat, the same guard
+// renderSetOptions uses above for the same reason.
+let lastScreenIdsKey = "";
+
+function renderScreenRows(screenIds) {
+  const key = screenIds.join(" ");
+  if (key === lastScreenIdsKey) return;
+  lastScreenIdsKey = key;
+
+  screensRowEl.replaceChildren(
+    ...screenIds.map((screenId) => {
+      const group = document.createElement("div");
+      group.className = "screen-group";
+      group.dataset.screenId = screenId;
+
+      const label = document.createElement("span");
+      label.className = "screen-label";
+      label.textContent = screenId;
+      group.appendChild(label);
+
+      const addButton = (glyph, title, onClick) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = glyph;
+        button.title = title;
+        button.addEventListener("click", onClick);
+        group.appendChild(button);
+        return button;
+      };
+
+      const nudgeShift = (dx, dy) => send({ type: "nudgeScreenShift", screenId, dx, dy });
+      const nudgeScale = (dScaleX, dScaleY) =>
+        send({ type: "nudgeScreenScale", screenId, dScaleX, dScaleY });
+
+      addButton("↑", `Nudge screen ${screenId} up`, () => nudgeShift(0, -LAYOUT_SHIFT_STEP_PX));
+      addButton("↓", `Nudge screen ${screenId} down`, () => nudgeShift(0, LAYOUT_SHIFT_STEP_PX));
+      addButton("←", `Nudge screen ${screenId} left`, () => nudgeShift(-LAYOUT_SHIFT_STEP_PX, 0));
+      addButton("→", `Nudge screen ${screenId} right`, () => nudgeShift(LAYOUT_SHIFT_STEP_PX, 0));
+      addButton("W−", `Squish screen ${screenId} narrower`, () =>
+        nudgeScale(-SCREEN_SCALE_STEP, 0),
+      );
+      addButton("W+", `Stretch screen ${screenId} wider`, () => nudgeScale(SCREEN_SCALE_STEP, 0));
+      addButton("H−", `Squish screen ${screenId} shorter`, () =>
+        nudgeScale(0, -SCREEN_SCALE_STEP),
+      );
+      addButton("H+", `Stretch screen ${screenId} taller`, () => nudgeScale(0, SCREEN_SCALE_STEP));
+
+      const readout = document.createElement("span");
+      readout.className = "screen-readout";
+      readout.dataset.readout = "true";
+      group.appendChild(readout);
+
+      addButton("↺", `Reset screen ${screenId}'s shift and scale`, () =>
+        send({ type: "resetScreenTransform", screenId }),
+      );
+
+      return group;
+    }),
+  );
+}
+
+function updateScreenReadouts(screenTransforms) {
+  for (const group of screensRowEl.children) {
+    const screenId = group.dataset.screenId;
+    const transform = screenTransforms?.[screenId] ?? {};
+    const x = transform.x ?? 0;
+    const y = transform.y ?? 0;
+    const scaleX = Math.round((transform.scale_x ?? 1) * 100);
+    const scaleY = Math.round((transform.scale_y ?? 1) * 100);
+    group.querySelector("[data-readout]").textContent = `${x},${y} ${scaleX}%,${scaleY}%`;
+  }
+}
+
 function renderFromSnapshot(snapshot) {
   latestCells = snapshot.cells;
   latestGlobal = snapshot.global;
@@ -105,6 +186,8 @@ function renderFromSnapshot(snapshot) {
   const g = snapshot.global;
   const offset = g.layoutOffset ?? { x: 0, y: 0 };
   shiftReadout.textContent = `${offset.x}, ${offset.y}`;
+  renderScreenRows(g.screenIds ?? []);
+  updateScreenReadouts(g.screenTransforms ?? {});
   if (Date.now() - localStatusAt >= LOCAL_STATUS_HOLD_MS) setStatus(g.status, g.statusState);
   audioEl.textContent = g.audioIndicatorText;
   audioEl.dataset.locked = String(g.audioLocked);
@@ -121,6 +204,9 @@ function renderFromSnapshot(snapshot) {
     for (let i = 0; i < snapshot.cells.length; i += 1) {
       const cell = document.createElement("div");
       cell.className = "cell";
+      const screenLabel = document.createElement("span");
+      screenLabel.className = "screen-letter";
+      cell.appendChild(screenLabel);
       const label = document.createElement("span");
       label.className = "label";
       cell.appendChild(label);
@@ -137,6 +223,7 @@ function renderFromSnapshot(snapshot) {
     if (cellData.videoId) cell.dataset.videoId = cellData.videoId;
     else delete cell.dataset.videoId;
     cell.querySelector(".label").textContent = cellData.title ?? "";
+    cell.querySelector(".screen-letter").textContent = cellData.screenId ?? "";
   });
 
   clearTimeout(staleTimer);

@@ -39,6 +39,10 @@ class ZoomSet(ZoomSetPayload):
 class VideoSetPayload(Strict):
     video_ids: list[str]
     reserves: list[str] = Field(default_factory=list)
+    # Travels with the set because a restore has no search response to pull
+    # titles from -- without this, restoring a set showed each cell's raw
+    # video id where its title belongs.
+    titles: dict[str, str] = Field(default_factory=dict)
 
 
 class VideoSet(VideoSetPayload):

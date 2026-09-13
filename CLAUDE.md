@@ -67,7 +67,7 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
 | `static/socket.js` | WS connect with backoff; re-syncs on every (re)connect. |
 | `static/wall-engine.js` | The actual player/DOM/YouTube-API engine (extracted from what used to be `player.js`): builds cells, pre-rolls, mute/audio targeting, zoom/pan, the context menu, the WS-driven config reconciliation. Exports `startWall({computeLayout, controlChannel})`; shared verbatim by `/` and `/layout`. Every interaction — a local DOM event or one relayed from `/layout-control` — funnels through the one `applyIntent()` dispatcher, and with `controlChannel` set it publishes a state snapshot over `BroadcastChannel` after each intent and on a 1s heartbeat. Both are opt-in: `/` passes no channel and behaves exactly as before. |
 | `static/player.js` | Bootstraps the `/` grid page via `wall-engine.js`'s `startWall()`. Two lines. |
-| `static/layout-fit.js` | Pure per-screen allocation/fit math for `/layout` — how a total video budget splits across the six real screens and how each screen's cells tile to approximate 16:9. No DOM, no fetch; node-tested like `grid-logic.js`. |
+| `static/layout-fit.js` | Pure per-screen allocation/fit math for `/layout` — how a total video budget splits across the six real screens and how each screen's cells tile to approximate 16:9 — plus `cellTransformStyle`, the per-cell CSS transform + clip-path for one screen's shift/stretch/squish (gotcha 44). No DOM, no fetch; node-tested like `grid-logic.js`. |
 | `static/layout-page.js` | Bootstraps `/layout`: loads `static/layout/screens.json`, builds a screens-based `computeLayout` from `layout-fit.js`'s `resolveLayout`, and calls `wall-engine.js`'s `startWall({computeLayout})`. |
 | `static/layout/screens.json` | Vendored, hand-copied snapshot of `../layout-driver/config/screens.yaml`'s geometry (canvas size, module size, per-screen grid/offset). No live link — see gotcha 39. |
 | `static/layout-control.html` | The operator's window: the same header markup `/layout` now hides, plus a grid of plain rectangles — one per cell, no iframes. Loads no YouTube API at all. |
@@ -504,6 +504,20 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     Raising `total` well past `grid.cols × rows` therefore trades some of the
     motion filtering gotcha 16 exists for.
 
+    **The `screens` array's ORDER is load-bearing too, not just each entry's
+    own numbers.** `resolveLayout` builds the flat `placements` list by
+    iterating this array screen-by-screen, and that flat index is the one
+    `wall-engine.js` uses everywhere (`gridEl.children[index]`, `views`,
+    `slotState.slots[index]`, audio targeting, drag/drop...). Reordering the
+    array — as when it was changed from a venue-driven order (F, B, C, D, A,
+    E) to alphabetical (A, B, C, D, E, F) — changes which cell index maps to
+    which physical screen, even though no screen's own `grid` geometry moved
+    at all. `../layout-driver/config/screens.yaml`'s own order has no such
+    effect there (`layout_server/config.py` only does id-keyed lookups and an
+    order-independent pairwise overlap check) but is still kept identical to
+    this file's, on the same "hand-copied snapshot" principle the rest of
+    this gotcha describes.
+
 40. **`/layout`'s chrome is `display: none`, and it must stay in the DOM.**
     The NDI broadcaster captures that window, so the header and the context
     menu may never paint — but `startWall()` opens with a dozen
@@ -596,6 +610,61 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     `SSL_CERT_FILE=$(mkcert -CAROOT)/rootCA.pem` in the caller's environment
     fixes it with no code change on either side.
 
+44. **Per-screen shift/stretch/squish (`LayoutConfig.screen_transforms`,
+    `layout-fit.js`'s `cellTransformStyle`) is a per-CELL CSS transform +
+    clip-path, deliberately not a per-screen wrapper `<div>`.** `wall-engine.js`
+    indexes `#grid`'s children directly and flatly
+    (`gridEl.children[index]`) in a few dozen places — drag/drop, the context
+    menu, audio targeting, hover, lock state. Nesting cells under a per-screen
+    container to get free clipping would break every one of them at once, the
+    same class of blast radius as gotcha 40's `/layout`-chrome-must-stay-in-
+    the-DOM rule. Instead every cell in a screen gets the SAME `scale()` and
+    the SAME `transform-origin`, computed to point at the *screen's* center
+    in that cell's own local coordinates — the well-known trick that makes a
+    set of independently-transformed elements move as one rigid block with no
+    shared parent at all. clip-path is computed in the cell's own
+    PRE-transform space (clip-path applies before the transform, in the CSS
+    painting model) by inverting the shift+scale to find which pre-transform
+    positions would land outside the screen's true boundary once transformed.
+
+    **`ScreenTransform`'s fields are `scale_x`/`scale_y`, snake_case, matching
+    every other field at this config/wire boundary (`offset_x`,
+    `max_per_screen`, ...) — and `cellTransformStyle` must destructure them by
+    those exact names, not `scaleX`/`scaleY`.** Getting this wrong once
+    produced a bug that 6 passing node unit tests did not catch: the tests'
+    own fixtures used the same (wrong) camelCase names as the implementation,
+    so they were internally consistent with each other and only wrong against
+    the real config shape. It surfaced as scale silently always reading as
+    its default of 1 — no error, no crash, just a nudge that visibly moved a
+    screen but a stretch/squish that visibly did nothing — and was only
+    caught by the browser smoke test, which exercises the real
+    `PUT /api/config` → WS broadcast → `computeLayout(config)` path with the
+    real, snake_cased wire data. This is the same class of invisible failure
+    gotcha 14 documents for `/layout`-only bugs: a wiring mismatch at a
+    language/format boundary that only a real end-to-end test can catch.
+
+    **Nudging one screen must PUT the WHOLE `screen_transforms` map, never
+    just that screen's own entry.** `merge_config` (`ytmatrix/config.py`)
+    merges only one level deep — `{layout: {screen_transforms: {F: {...}}}}`
+    would replace the entire map, silently discarding every other screen's
+    saved shift/scale. `wall-engine.js`'s `nudgeScreenShift`/
+    `nudgeScreenScale`/`resetScreenTransform` all read the current full map
+    out of the live `config` (not this browser's own last render) and spread
+    it before overwriting one entry — the same pattern gotcha-adjacent code
+    already used for `offset_x`/`offset_y`, just one level deeper.
+
+    **A config push must reapply `cellRect`, not just `containerStyle`, to
+    every existing cell.** The global shift (`offset_x`/`offset_y`) lives on
+    `#grid`'s own container transform, so the existing fix (reapply
+    `containerStyle` unconditionally on every WS "config" message, regardless
+    of `classifyConfigChange`'s rebuild/in-place/none verdict) was enough for
+    it. Per-screen transforms live on individual cells instead, so that fix
+    had to grow a loop over `gridEl.children` reapplying `layout.cellRect(index)`
+    to each one — otherwise a `screen_transforms`-only edit (which
+    `classifyConfigChange` classifies as `"none"`, same blind spot as the
+    original offset bug) would silently never reach the DOM at all outside a
+    full rebuild.
+
 43. **A restored video set is sticky across a reconnect; a restored zoom set is
     not — and that asymmetry is deliberate, not an oversight.** `/layout-control`
     can save, restore, and delete two kinds of named server-side set
@@ -623,3 +692,17 @@ npm run deploy                          # needs Docker; see docs/DEPLOY.md
     restore is fragile in a way a video-set restore is not — it survives until
     the next rebuild, full stop — and that is the correct, narrower guarantee
     for "look" versus "content."
+
+    **A saved video set must carry its own titles, or a restore shows raw
+    video ids where a title belongs.** `applyVideos()`'s only source of a
+    title is the `titles` field on whatever message it is given, and
+    `restoreVideoSet` builds a synthetic message with no search response
+    behind it at all — there is nothing else to pull a title from.
+    `slotStateToVideoSet` (`grid-logic.js`) therefore captures a `titles: {id:
+    title}` map from the live wall's own title cache at save time (an id with
+    no currently-known title is simply omitted, not stored as null), and
+    `VideoSetPayload.titles` (`ytmatrix/sets.py`) persists it alongside
+    `video_ids`/`reserves`. This was a real, previously-shipped bug: saving
+    and restoring a set round-tripped the video ids correctly, so the wall
+    looked right, but every restored cell's title silently fell back to its
+    raw id.
